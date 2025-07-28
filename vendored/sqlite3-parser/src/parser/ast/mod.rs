@@ -1774,6 +1774,8 @@ pub enum PragmaName {
     JournalMode,
     /// Noop as per SQLite docs
     LegacyFileFormat,
+    /// `module_list` praagma
+    ModuleList,
     /// Return the total number of pages in the database file.
     PageCount,
     /// Return the page size of the database in bytes.
