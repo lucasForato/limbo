@@ -10,6 +10,7 @@ use fallible_iterator::FallibleIterator;
 use std::cell::RefCell;
 use std::collections::hash_map::Entry;
 use std::collections::{BTreeSet, HashMap};
+use std::ops::Deref;
 use std::rc::Rc;
 use std::sync::Arc;
 use tracing::trace;
@@ -22,7 +23,7 @@ use turso_sqlite3_parser::{
 const SCHEMA_TABLE_NAME: &str = "sqlite_schema";
 const SCHEMA_TABLE_NAME_ALT: &str = "sqlite_master";
 
-#[derive(Debug, Clone)]
+#[derive(Debug)]
 pub struct Schema {
     pub tables: HashMap<String, Arc<Table>>,
     /// table_name to list of indexes for the table
@@ -43,7 +44,10 @@ impl Schema {
             Arc::new(Table::BTree(sqlite_schema_table().into())),
         );
         for function in VirtualTable::builtin_functions() {
-            tables.insert(function.name.to_owned(), Arc::new(Table::Virtual(function)));
+            tables.insert(
+                function.name.to_owned(),
+                Arc::new(Table::Virtual(Arc::new((*function).clone()))),
+            );
         }
         Self {
             tables,
@@ -61,12 +65,12 @@ impl Schema {
             .any(|idx| idx.1.iter().any(|i| i.name == name))
     }
 
-    pub fn add_btree_table(&mut self, table: Rc<BTreeTable>) {
+    pub fn add_btree_table(&mut self, table: Arc<BTreeTable>) {
         let name = normalize_ident(&table.name);
         self.tables.insert(name, Table::BTree(table).into());
     }
 
-    pub fn add_virtual_table(&mut self, table: Rc<VirtualTable>) {
+    pub fn add_virtual_table(&mut self, table: Arc<VirtualTable>) {
         let name = normalize_ident(&table.name);
         self.tables.insert(name, Table::Virtual(table).into());
     }
@@ -86,7 +90,7 @@ impl Schema {
         self.tables.remove(&name);
     }
 
-    pub fn get_btree_table(&self, name: &str) -> Option<Rc<BTreeTable>> {
+    pub fn get_btree_table(&self, name: &str) -> Option<Arc<BTreeTable>> {
         let name = normalize_ident(name);
         if let Some(table) = self.tables.get(&name) {
             table.btree()
@@ -197,22 +201,23 @@ impl Schema {
                         // longer in the in-memory schema. We need to recreate it if
                         // the module is loaded in the symbol table.
                         let vtab = if let Some(vtab) = syms.vtabs.get(name) {
-                            vtab.clone()
+                            Arc::new((**vtab).clone())
                         } else {
                             let mod_name = module_name_from_sql(sql)?;
-                            crate::VirtualTable::table(
+                            let vtab_rc = crate::VirtualTable::table(
                                 Some(name),
                                 mod_name,
                                 module_args_from_sql(sql)?,
                                 syms,
-                            )?
+                            )?;
+                            Arc::new((*vtab_rc).clone())
                         };
                         self.add_virtual_table(vtab);
                         continue;
                     }
 
                     let table = BTreeTable::from_sql(sql, root_page as usize)?;
-                    self.add_btree_table(Rc::new(table));
+                    self.add_btree_table(Arc::new(table));
                 }
                 "index" => {
                     let root_page_value = record_cursor.get_value(&row, 3)?;
@@ -311,10 +316,61 @@ impl Schema {
     }
 }
 
+impl Clone for Schema {
+    /// Cloning a `Schema` requires deep cloning of all internal tables and indexes, even though they are wrapped in `Arc`.
+    /// Simply copying the `Arc` pointers would result in multiple `Schema` instances sharing the same underlying tables and indexes,
+    /// which could lead to panics or data races if any instance attempts to modify them.
+    /// To ensure each `Schema` is independent and safe to modify, we clone the underlying data for all tables and indexes.
+    fn clone(&self) -> Self {
+        let tables = self
+            .tables
+            .iter()
+            .map(|(name, table)| match table.deref() {
+                Table::BTree(table) => {
+                    let table = Arc::deref(table);
+                    (
+                        name.clone(),
+                        Arc::new(Table::BTree(Arc::new(table.clone()))),
+                    )
+                }
+                Table::Virtual(table) => {
+                    let table = Arc::deref(table);
+                    (
+                        name.clone(),
+                        Arc::new(Table::Virtual(Arc::new(table.clone()))),
+                    )
+                }
+                Table::FromClauseSubquery(from_clause_subquery) => (
+                    name.clone(),
+                    Arc::new(Table::FromClauseSubquery(from_clause_subquery.clone())),
+                ),
+            })
+            .collect();
+        let indexes = self
+            .indexes
+            .iter()
+            .map(|(name, indexes)| {
+                let indexes = indexes
+                    .iter()
+                    .map(|index| Arc::new((**index).clone()))
+                    .collect();
+                (name.clone(), indexes)
+            })
+            .collect();
+        Self {
+            tables,
+            indexes,
+            has_indexes: self.has_indexes.clone(),
+            indexes_enabled: self.indexes_enabled,
+            schema_version: self.schema_version,
+        }
+    }
+}
+
 #[derive(Clone, Debug)]
 pub enum Table {
-    BTree(Rc<BTreeTable>),
-    Virtual(Rc<VirtualTable>),
+    BTree(Arc<BTreeTable>),
+    Virtual(Arc<VirtualTable>),
     FromClauseSubquery(FromClauseSubquery),
 }
 
@@ -353,7 +409,7 @@ impl Table {
         }
     }
 
-    pub fn btree(&self) -> Option<Rc<BTreeTable>> {
+    pub fn btree(&self) -> Option<Arc<BTreeTable>> {
         match self {
             Self::BTree(table) => Some(table.clone()),
             Self::Virtual(_) => None,
@@ -361,7 +417,7 @@ impl Table {
         }
     }
 
-    pub fn virtual_table(&self) -> Option<Rc<VirtualTable>> {
+    pub fn virtual_table(&self) -> Option<Arc<VirtualTable>> {
         match self {
             Self::Virtual(table) => Some(table.clone()),
             _ => None,
@@ -372,8 +428,8 @@ impl Table {
 impl PartialEq for Table {
     fn eq(&self, other: &Self) -> bool {
         match (self, other) {
-            (Self::BTree(a), Self::BTree(b)) => Rc::ptr_eq(a, b),
-            (Self::Virtual(a), Self::Virtual(b)) => Rc::ptr_eq(a, b),
+            (Self::BTree(a), Self::BTree(b)) => Arc::ptr_eq(a, b),
+            (Self::Virtual(a), Self::Virtual(b)) => Arc::ptr_eq(a, b),
             _ => false,
         }
     }
@@ -425,7 +481,7 @@ impl BTreeTable {
             Some(Cmd::Stmt(Stmt::CreateTable { tbl_name, body, .. })) => {
                 create_table(tbl_name, *body, root_page)
             }
-            _ => todo!("Expected CREATE TABLE statement"),
+            _ => unreachable!("Expected CREATE TABLE statement"),
         }
     }
 
@@ -1135,7 +1191,7 @@ pub fn sqlite_schema_table() -> BTreeTable {
 }
 
 #[allow(dead_code)]
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Index {
     pub name: String,
     pub table_name: String,

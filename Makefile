@@ -9,7 +9,7 @@ MINIMUM_TCL_VERSION := 8.6
 SQLITE_EXEC ?= scripts/limbo-sqlite3
 RUST_LOG := off
 
-all: check-rust-version check-wasm-target limbo limbo-wasm
+all: check-rust-version limbo
 .PHONY: all
 
 check-rust-version:
@@ -39,14 +39,6 @@ check-tcl-version:
 	| tclsh
 .PHONY: check-tcl-version
 
-check-wasm-target:
-	@echo "Checking wasm32-wasip1 target..."
-	@if ! rustup target list | grep -q "wasm32-wasip1 (installed)"; then \
-		echo "Installing wasm32-wasip1 target..."; \
-		rustup target add wasm32-wasip1; \
-	fi
-.PHONY: check-wasm-target
-
 limbo:
 	cargo build
 .PHONY: limbo
@@ -54,11 +46,6 @@ limbo:
 limbo-c:
 	cargo cbuild
 .PHONY: limbo-c
-
-limbo-wasm:
-	rustup target add wasm32-wasip1
-	cargo build --package limbo-wasm --target wasm32-wasip1
-.PHONY: limbo-wasm
 
 uv-sync:
 	uv sync --all-packages
@@ -163,3 +150,9 @@ bench-exclude-tpc-h:
 		cargo bench $$benchmarks; \
 	fi
 .PHONY: bench-exclude-tpc-h
+
+docker-cli-build:
+	docker build -f Dockerfile.cli -t turso-cli .
+
+docker-cli-run:
+	docker run -it -v ./:/app turso-cli

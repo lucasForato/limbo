@@ -5,10 +5,10 @@ The next evolution of SQLite: A high-performance, SQLite-compatible database lib
 ## Features
 
 - **SQLite Compatible**: Drop-in replacement for better-sqlite3 with familiar API
-- **High Performance**: Built with Rust for maximum speed and efficiency  
+- **High Performance**: Built with Rust for maximum speed and efficiency
 - **In-Process**: No network overhead, runs directly in your Node.js process
 - **TypeScript Support**: Full TypeScript definitions included
-- **Cross-Platform**: Supports Linux, macOS, and Windows
+- **Cross-Platform**: Supports Linux, macOS, Windows and browsers (through WebAssembly)
 - **Transaction Support**: Full ACID transactions with rollback support
 - **Prepared Statements**: Optimized query execution with parameter binding
 

@@ -1,7 +1,6 @@
 use super::{Buffer, Completion, File, MemoryIO, OpenFlags, IO};
 use crate::ext::VfsMod;
 use crate::io::clock::{Clock, Instant};
-use crate::io::CompletionType;
 use crate::{LimboError, Result};
 use std::cell::RefCell;
 use std::ffi::{c_void, CString};
@@ -44,8 +43,9 @@ impl IO for VfsMod {
         Ok(())
     }
 
-    fn wait_for_completion(&self, _c: Arc<Completion>) -> Result<()> {
-        todo!();
+    fn wait_for_completion(&self, _c: Completion) -> Result<()> {
+        // for the moment anyway, this is currently a sync api
+        Ok(())
     }
 
     fn generate_random_number(&self) -> i64 {
@@ -98,11 +98,8 @@ impl File for VfsFileImpl {
         Ok(())
     }
 
-    fn pread(&self, pos: usize, c: Arc<Completion>) -> Result<Arc<Completion>> {
-        let r = match c.completion_type {
-            CompletionType::Read(ref r) => r,
-            _ => unreachable!(),
-        };
+    fn pread(&self, pos: usize, c: Completion) -> Result<Completion> {
+        let r = c.as_read();
         let result = {
             let mut buf = r.buf_mut();
             let count = buf.len();
@@ -121,8 +118,8 @@ impl File for VfsFileImpl {
         &self,
         pos: usize,
         buffer: Arc<RefCell<Buffer>>,
-        c: Arc<Completion>,
-    ) -> Result<Arc<Completion>> {
+        c: Completion,
+    ) -> Result<Completion> {
         let buf = buffer.borrow();
         let count = buf.as_slice().len();
         if self.vfs.is_null() {
@@ -146,7 +143,7 @@ impl File for VfsFileImpl {
         }
     }
 
-    fn sync(&self, c: Arc<Completion>) -> Result<Arc<Completion>> {
+    fn sync(&self, c: Completion) -> Result<Completion> {
         let vfs = unsafe { &*self.vfs };
         let result = unsafe { (vfs.sync)(self.file) };
         if result < 0 {
@@ -164,6 +161,20 @@ impl File for VfsFileImpl {
             Err(LimboError::ExtensionError("size failed".to_string()))
         } else {
             Ok(result as u64)
+        }
+    }
+
+    fn truncate(&self, len: usize, c: Completion) -> Result<Completion> {
+        if self.vfs.is_null() {
+            return Err(LimboError::ExtensionError("VFS is null".to_string()));
+        }
+        let vfs = unsafe { &*self.vfs };
+        let result = unsafe { (vfs.truncate)(self.file, len as i64) };
+        if result.is_error() {
+            Err(LimboError::ExtensionError("truncate failed".to_string()))
+        } else {
+            c.complete(0);
+            Ok(c)
         }
     }
 }

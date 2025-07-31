@@ -1,6 +1,5 @@
 use std::{
     num::{NonZero, NonZeroUsize},
-    rc::Rc,
     sync::Arc,
 };
 
@@ -417,7 +416,7 @@ pub enum Insn {
         /// GENERATED ALWAYS AS ... STATIC columns are only checked if P3 is zero.
         /// When P3 is non-zero, no type checking occurs for static generated columns.
         check_generated: bool, // P3
-        table_reference: Rc<BTreeTable>, // P4
+        table_reference: Arc<BTreeTable>, // P4
     },
 
     // Make a record and write it to destination register.
@@ -705,6 +704,12 @@ pub enum Insn {
         start_reg: usize,   // P2, start of argument registers
         dest: usize,        // P3
         func: FuncCtx,      // P4
+    },
+
+    /// Cast register P1 to affinity P2 and store in register P1
+    Cast {
+        reg: usize,
+        affinity: Affinity,
     },
 
     InitCoroutine {
@@ -1076,6 +1081,7 @@ impl Insn {
             Insn::SorterData { .. } => execute::op_sorter_data,
             Insn::SorterNext { .. } => execute::op_sorter_next,
             Insn::Function { .. } => execute::op_function,
+            Insn::Cast { .. } => execute::op_cast,
             Insn::InitCoroutine { .. } => execute::op_init_coroutine,
             Insn::EndCoroutine { .. } => execute::op_end_coroutine,
             Insn::Yield { .. } => execute::op_yield,

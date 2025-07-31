@@ -1,5 +1,5 @@
 import avaTest from "ava";
-import turso from "../wrapper.js";
+import turso from "../sync.js";
 import sqlite from "better-sqlite3";
 
 class DualTest {

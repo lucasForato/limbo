@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use std::rc::Rc;
+use std::sync::Arc;
 
 use crate::schema::{BTreeTable, Column, Type};
 use crate::translate::optimizer::optimize_select_plan;
@@ -12,9 +12,10 @@ use crate::{
     vdbe::builder::{ProgramBuilder, ProgramBuilderOpts},
     SymbolTable,
 };
-use turso_sqlite3_parser::ast::{self, Expr, ResultColumn, SortOrder, Update};
+use turso_sqlite3_parser::ast::{Expr, SortOrder, Update};
 
 use super::emitter::emit_program;
+use super::expr::process_returning_clause;
 use super::optimizer::optimize_plan;
 use super::plan::{
     ColumnUsedMask, IterationDirection, JoinedTable, Plan, ResultSetColumn, TableReferences,
@@ -56,8 +57,9 @@ pub fn translate_update(
     body: &mut Update,
     syms: &SymbolTable,
     mut program: ProgramBuilder,
+    connection: &Arc<crate::Connection>,
 ) -> crate::Result<ProgramBuilder> {
-    let mut plan = prepare_update_plan(&mut program, schema, body)?;
+    let mut plan = prepare_update_plan(&mut program, schema, body, connection)?;
     optimize_plan(&mut plan, schema)?;
     // TODO: freestyling these numbers
     let opts = ProgramBuilderOpts {
@@ -75,9 +77,10 @@ pub fn translate_update_with_after(
     body: &mut Update,
     syms: &SymbolTable,
     mut program: ProgramBuilder,
+    connection: &Arc<crate::Connection>,
     after: impl FnOnce(&mut ProgramBuilder),
 ) -> crate::Result<ProgramBuilder> {
-    let mut plan = prepare_update_plan(&mut program, schema, body)?;
+    let mut plan = prepare_update_plan(&mut program, schema, body, connection)?;
     optimize_plan(&mut plan, schema)?;
     // TODO: freestyling these numbers
     let opts = ProgramBuilderOpts {
@@ -94,6 +97,7 @@ pub fn prepare_update_plan(
     program: &mut ProgramBuilder,
     schema: &Schema,
     body: &mut Update,
+    connection: &Arc<crate::Connection>,
 ) -> crate::Result<Plan> {
     if body.with.is_some() {
         bail_parse_error!("WITH clause is not supported");
@@ -155,10 +159,10 @@ pub fn prepare_update_plan(
     for set in &mut body.sets {
         let ident = normalize_ident(set.col_names[0].as_str());
         let Some(col_index) = column_lookup.get(&ident) else {
-            bail_parse_error!("Parse error: no such column: {}", ident);
+            bail_parse_error!("no such column: {}", ident);
         };
 
-        let _ = bind_column_references(&mut set.expr, &mut table_references, None);
+        bind_column_references(&mut set.expr, &mut table_references, None, connection)?;
 
         if let Some(idx) = set_clauses.iter().position(|(idx, _)| *idx == *col_index) {
             set_clauses[idx].1 = set.expr.clone();
@@ -167,27 +171,21 @@ pub fn prepare_update_plan(
         }
     }
 
-    let mut result_columns = vec![];
-    if let Some(returning) = &mut body.returning {
-        for rc in returning.iter_mut() {
-            if let ResultColumn::Expr(expr, alias) = rc {
-                bind_column_references(expr, &mut table_references, None)?;
-                result_columns.push(ResultSetColumn {
-                    expr: expr.clone(),
-                    alias: alias.as_ref().and_then(|a| {
-                        if let ast::As::As(name) = a {
-                            Some(name.to_string())
-                        } else {
-                            None
-                        }
-                    }),
-                    contains_aggregates: false,
-                });
-            } else {
-                bail_parse_error!("Only expressions are allowed in RETURNING clause");
-            }
-        }
-    }
+    let (result_columns, _table_references) = if let Some(returning) = &mut body.returning {
+        process_returning_clause(
+            returning,
+            &table,
+            body.tbl_name.name.as_str(),
+            program,
+            connection,
+        )?
+    } else {
+        (
+            vec![],
+            crate::translate::plan::TableReferences::new(vec![], vec![]),
+        )
+    };
+
     let order_by = body.order_by.as_ref().map(|order| {
         order
             .iter()
@@ -233,9 +231,10 @@ pub fn prepare_update_plan(
             &mut table_references,
             Some(&result_columns),
             &mut where_clause,
+            connection,
         )?;
 
-        let table = Rc::new(BTreeTable {
+        let table = Arc::new(BTreeTable {
             root_page: 0, // Not relevant for ephemeral table definition
             name: "ephemeral_scratch".to_string(),
             has_rowid: true,
@@ -307,6 +306,7 @@ pub fn prepare_update_plan(
             &mut table_references,
             Some(&result_columns),
             &mut where_clause,
+            connection,
         )?;
     };
 
@@ -336,7 +336,11 @@ pub fn prepare_update_plan(
         table_references,
         set_clauses,
         where_clause,
-        returning: Some(result_columns),
+        returning: if result_columns.is_empty() {
+            None
+        } else {
+            Some(result_columns)
+        },
         order_by,
         limit,
         offset,

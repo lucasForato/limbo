@@ -1768,6 +1768,8 @@ pub enum PragmaName {
     CacheSize,
     /// List databases
     DatabaseList,
+    /// Encoding - only support utf8
+    Encoding,
     /// Run integrity check on the database file
     IntegrityCheck,
     /// `journal_mode` pragma

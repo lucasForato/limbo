@@ -1,4 +1,4 @@
-use std::{cell::Cell, cmp::Ordering, rc::Rc, sync::Arc};
+use std::{cell::Cell, cmp::Ordering, sync::Arc};
 use turso_ext::{ConstraintInfo, ConstraintOp};
 use turso_sqlite3_parser::ast::{self, SortOrder};
 
@@ -333,7 +333,7 @@ pub enum QueryDestination {
         /// The cursor ID of the ephemeral table that will be used to store the results.
         cursor_id: CursorID,
         /// The table that will be used to store the results.
-        table: Rc<BTreeTable>,
+        table: Arc<BTreeTable>,
     },
 }
 
@@ -464,7 +464,7 @@ impl SelectPlan {
                 QueryDestination::CoroutineYield { .. }
             )
             || self.table_references.joined_tables().len() != 1
-            || self.table_references.outer_query_refs().is_empty()
+            || !self.table_references.outer_query_refs().is_empty()
             || self.result_columns.len() != 1
             || self.group_by.is_some()
             || self.contains_constant_false_condition
@@ -887,13 +887,13 @@ impl Operation {
 
 impl JoinedTable {
     /// Returns the btree table for this table reference, if it is a BTreeTable.
-    pub fn btree(&self) -> Option<Rc<BTreeTable>> {
+    pub fn btree(&self) -> Option<Arc<BTreeTable>> {
         match &self.table {
             Table::BTree(_) => self.table.btree(),
             _ => None,
         }
     }
-    pub fn virtual_table(&self) -> Option<Rc<VirtualTable>> {
+    pub fn virtual_table(&self) -> Option<Arc<VirtualTable>> {
         match &self.table {
             Table::Virtual(_) => self.table.virtual_table(),
             _ => None,

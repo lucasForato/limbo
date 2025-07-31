@@ -40,7 +40,7 @@ Turso Database is a _work-in-progress_, in-process OLTP database engine library 
   * [Java](bindings/java)
   * [Python](bindings/python)
   * [Rust](bindings/rust)
-  * [WebAssembly](bindings/wasm)
+  * [WebAssembly](bindings/javascript)
 * **Asynchronous I/O** support on Linux with `io_uring`
 * **OS support** for Linux, macOS, and Windows
 
@@ -86,6 +86,13 @@ You can also build and run the latest development version with:
 
 ```shell
 cargo run
+```
+
+If you like docker, we got you covered. Simply run this in the root folder:
+
+```bash
+make docker-cli-build && \
+make docker-cli-run
 ```
 
 ### MCP Server Mode

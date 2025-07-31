@@ -3,7 +3,7 @@
 
 use std::ffi::{self, CStr, CString};
 use tracing::trace;
-use turso_core::{LimboError, Value};
+use turso_core::{CheckpointMode, LimboError, Value};
 
 use std::sync::{Arc, Mutex};
 
@@ -39,7 +39,7 @@ pub struct sqlite3 {
 }
 
 struct sqlite3Inner {
-    pub(crate) io: Arc<dyn turso_core::IO>,
+    pub(crate) _io: Arc<dyn turso_core::IO>,
     pub(crate) _db: Arc<turso_core::Database>,
     pub(crate) conn: Arc<turso_core::Connection>,
     pub(crate) err_code: ffi::c_int,
@@ -56,7 +56,7 @@ impl sqlite3 {
         conn: Arc<turso_core::Connection>,
     ) -> Self {
         let inner = sqlite3Inner {
-            io,
+            _io: io,
             _db: db,
             conn,
             err_code: SQLITE_OK,
@@ -1108,20 +1108,41 @@ pub unsafe extern "C" fn sqlite3_wal_checkpoint(
 pub unsafe extern "C" fn sqlite3_wal_checkpoint_v2(
     db: *mut sqlite3,
     _db_name: *const ffi::c_char,
-    _mode: ffi::c_int,
-    _log_size: *mut ffi::c_int,
-    _checkpoint_count: *mut ffi::c_int,
+    mode: ffi::c_int,
+    log_size: *mut ffi::c_int,
+    checkpoint_count: *mut ffi::c_int,
 ) -> ffi::c_int {
     if db.is_null() {
         return SQLITE_MISUSE;
     }
     let db: &mut sqlite3 = &mut *db;
     let db = db.inner.lock().unwrap();
-    // TODO: Checkpointing modes and reporting back log size and checkpoint count to caller.
-    if db.conn.checkpoint().is_err() {
-        return SQLITE_ERROR;
+    let chkptmode = match mode {
+        SQLITE_CHECKPOINT_PASSIVE => CheckpointMode::Passive,
+        SQLITE_CHECKPOINT_RESTART => CheckpointMode::Restart,
+        SQLITE_CHECKPOINT_TRUNCATE => CheckpointMode::Truncate,
+        SQLITE_CHECKPOINT_FULL => CheckpointMode::Full,
+        _ => return SQLITE_MISUSE, // Unsupported mode
+    };
+    match db.conn.checkpoint(chkptmode) {
+        Ok(res) => {
+            if !log_size.is_null() {
+                (*log_size) = res.num_wal_frames as ffi::c_int;
+            }
+            if !checkpoint_count.is_null() {
+                (*checkpoint_count) = res.num_checkpointed_frames as ffi::c_int;
+            }
+            SQLITE_OK
+        }
+        Err(e) => {
+            println!("Checkpoint error: {e}");
+            if matches!(e, turso_core::LimboError::Busy) {
+                SQLITE_BUSY
+            } else {
+                SQLITE_ERROR
+            }
+        }
     }
-    SQLITE_OK
 }
 
 /// Get the number of frames in the WAL.
@@ -1193,10 +1214,7 @@ pub unsafe extern "C" fn libsql_wal_get_frame(
     let db = db.inner.lock().unwrap();
     let frame = std::slice::from_raw_parts_mut(p_frame, frame_len as usize);
     match db.conn.wal_get_frame(frame_no, frame) {
-        Ok(c) => match db.io.wait_for_completion(c) {
-            Ok(_) => SQLITE_OK,
-            Err(_) => SQLITE_ERROR,
-        },
+        Ok(()) => SQLITE_OK,
         Err(_) => SQLITE_ERROR,
     }
 }
@@ -1233,7 +1251,7 @@ pub unsafe extern "C" fn libsql_wal_insert_frame(
     let db = db.inner.lock().unwrap();
     let frame = std::slice::from_raw_parts(p_frame, frame_len as usize);
     match db.conn.wal_insert_frame(frame_no, frame) {
-        Ok(()) => SQLITE_OK,
+        Ok(_) => SQLITE_OK,
         Err(LimboError::Conflict(..)) => {
             if !p_conflict.is_null() {
                 *p_conflict = 1;

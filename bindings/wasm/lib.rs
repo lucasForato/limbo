@@ -216,8 +216,8 @@ impl turso_core::File for File {
     fn pread(
         &self,
         pos: usize,
-        c: Arc<turso_core::Completion>,
-    ) -> Result<Arc<turso_core::Completion>> {
+        c: turso_core::Completion,
+    ) -> Result<turso_core::Completion> {
         let r = match c.completion_type {
             turso_core::CompletionType::Read(ref r) => r,
             _ => unreachable!(),
@@ -236,8 +236,8 @@ impl turso_core::File for File {
         &self,
         pos: usize,
         buffer: Arc<std::cell::RefCell<turso_core::Buffer>>,
-        c: Arc<turso_core::Completion>,
-    ) -> Result<Arc<turso_core::Completion>> {
+        c: turso_core::Completion,
+    ) -> Result<turso_core::Completion> {
         let w = match c.completion_type {
             turso_core::CompletionType::Write(ref w) => w,
             _ => unreachable!(),
@@ -250,7 +250,7 @@ impl turso_core::File for File {
         Ok(c)
     }
 
-    fn sync(&self, c: Arc<turso_core::Completion>) -> Result<Arc<turso_core::Completion>> {
+    fn sync(&self, c: turso_core::Completion) -> Result<turso_core::Completion> {
         self.vfs.sync(self.fd);
         c.complete(0);
         #[allow(clippy::arc_with_non_send_sync)]
@@ -259,6 +259,17 @@ impl turso_core::File for File {
 
     fn size(&self) -> Result<u64> {
         Ok(self.vfs.size(self.fd))
+    }
+
+    fn truncate(
+        &self,
+        len: usize,
+        c: turso_core::Completion,
+    ) -> Result<turso_core::Completion> {
+        self.vfs.truncate(self.fd, len);
+        c.complete(0);
+        #[allow(clippy::arc_with_non_send_sync)]
+        Ok(c)
     }
 }
 
@@ -294,7 +305,7 @@ impl turso_core::IO for PlatformIO {
         }))
     }
 
-    fn wait_for_completion(&self, c: Arc<turso_core::Completion>) -> Result<()> {
+    fn wait_for_completion(&self, c: turso_core::Completion) -> Result<()> {
         while !c.is_completed() {
             self.run_once()?;
         }
@@ -379,6 +390,11 @@ impl turso_core::DatabaseStorage for DatabaseFile {
     fn size(&self) -> Result<u64> {
         self.file.size()
     }
+
+    fn truncate(&self, len: usize, c: turso_core::Completion) -> Result<()> {
+        self.file.truncate(len, c)?;
+        Ok(())
+    }
 }
 
 #[cfg(all(feature = "web", not(feature = "nodejs")))]
@@ -402,6 +418,9 @@ extern "C" {
 
     #[wasm_bindgen(method)]
     fn size(this: &VFS, fd: i32) -> u64;
+
+    #[wasm_bindgen(method)]
+    fn truncate(this: &VFS, fd: i32, len: usize);
 
     #[wasm_bindgen(method)]
     fn sync(this: &VFS, fd: i32);
@@ -428,6 +447,9 @@ extern "C" {
 
     #[wasm_bindgen(method)]
     fn size(this: &VFS, fd: i32) -> u64;
+
+    #[wasm_bindgen(method)]
+    fn truncate(this: &VFS, fd: i32, len: usize);
 
     #[wasm_bindgen(method)]
     fn sync(this: &VFS, fd: i32);

@@ -1,5 +1,4 @@
 use crate::error::LimboError;
-use crate::io::CompletionType;
 use crate::{io::Completion, Buffer, Result};
 use std::{cell::RefCell, sync::Arc};
 use tracing::{instrument, Level};
@@ -10,15 +9,23 @@ use tracing::{instrument, Level};
 /// the storage medium. A database can either be a file on disk, like in SQLite,
 /// or something like a remote page server service.
 pub trait DatabaseStorage: Send + Sync {
-    fn read_page(&self, page_idx: usize, c: Completion) -> Result<()>;
+    fn read_page(&self, page_idx: usize, c: Completion) -> Result<Completion>;
     fn write_page(
         &self,
         page_idx: usize,
         buffer: Arc<RefCell<Buffer>>,
         c: Completion,
-    ) -> Result<()>;
-    fn sync(&self, c: Completion) -> Result<()>;
+    ) -> Result<Completion>;
+    fn write_pages(
+        &self,
+        first_page_idx: usize,
+        page_size: usize,
+        buffers: Vec<Arc<RefCell<Buffer>>>,
+        c: Completion,
+    ) -> Result<Completion>;
+    fn sync(&self, c: Completion) -> Result<Completion>;
     fn size(&self) -> Result<u64>;
+    fn truncate(&self, len: usize, c: Completion) -> Result<Completion>;
 }
 
 #[cfg(feature = "fs")]
@@ -34,7 +41,7 @@ unsafe impl Sync for DatabaseFile {}
 #[cfg(feature = "fs")]
 impl DatabaseStorage for DatabaseFile {
     #[instrument(skip_all, level = Level::DEBUG)]
-    fn read_page(&self, page_idx: usize, c: Completion) -> Result<()> {
+    fn read_page(&self, page_idx: usize, c: Completion) -> Result<Completion> {
         let r = c.as_read();
         let size = r.buf().len();
         assert!(page_idx > 0);
@@ -42,8 +49,7 @@ impl DatabaseStorage for DatabaseFile {
             return Err(LimboError::NotADB);
         }
         let pos = (page_idx - 1) * size;
-        self.file.pread(pos, c.into())?;
-        Ok(())
+        self.file.pread(pos, c)
     }
 
     #[instrument(skip_all, level = Level::DEBUG)]
@@ -52,26 +58,46 @@ impl DatabaseStorage for DatabaseFile {
         page_idx: usize,
         buffer: Arc<RefCell<Buffer>>,
         c: Completion,
-    ) -> Result<()> {
+    ) -> Result<Completion> {
         let buffer_size = buffer.borrow().len();
         assert!(page_idx > 0);
         assert!(buffer_size >= 512);
         assert!(buffer_size <= 65536);
         assert_eq!(buffer_size & (buffer_size - 1), 0);
         let pos = (page_idx - 1) * buffer_size;
-        self.file.pwrite(pos, buffer, c.into())?;
-        Ok(())
+        self.file.pwrite(pos, buffer, c)
+    }
+
+    fn write_pages(
+        &self,
+        page_idx: usize,
+        page_size: usize,
+        buffers: Vec<Arc<RefCell<Buffer>>>,
+        c: Completion,
+    ) -> Result<Completion> {
+        assert!(page_idx > 0);
+        assert!(page_size >= 512);
+        assert!(page_size <= 65536);
+        assert_eq!(page_size & (page_size - 1), 0);
+        let pos = (page_idx - 1) * page_size;
+        let c = self.file.pwritev(pos, buffers, c)?;
+        Ok(c)
     }
 
     #[instrument(skip_all, level = Level::DEBUG)]
-    fn sync(&self, c: Completion) -> Result<()> {
-        let _ = self.file.sync(c.into())?;
-        Ok(())
+    fn sync(&self, c: Completion) -> Result<Completion> {
+        self.file.sync(c)
     }
 
     #[instrument(skip_all, level = Level::DEBUG)]
     fn size(&self) -> Result<u64> {
         self.file.size()
+    }
+
+    #[instrument(skip_all, level = Level::INFO)]
+    fn truncate(&self, len: usize, c: Completion) -> Result<Completion> {
+        let c = self.file.truncate(len, c)?;
+        Ok(c)
     }
 }
 
@@ -91,19 +117,15 @@ unsafe impl Sync for FileMemoryStorage {}
 
 impl DatabaseStorage for FileMemoryStorage {
     #[instrument(skip_all, level = Level::DEBUG)]
-    fn read_page(&self, page_idx: usize, c: Completion) -> Result<()> {
-        let r = match c.completion_type {
-            CompletionType::Read(ref r) => r,
-            _ => unreachable!(),
-        };
+    fn read_page(&self, page_idx: usize, c: Completion) -> Result<Completion> {
+        let r = c.as_read();
         let size = r.buf().len();
         assert!(page_idx > 0);
         if !(512..=65536).contains(&size) || size & (size - 1) != 0 {
             return Err(LimboError::NotADB);
         }
         let pos = (page_idx - 1) * size;
-        self.file.pread(pos, c.into())?;
-        Ok(())
+        self.file.pread(pos, c)
     }
 
     #[instrument(skip_all, level = Level::DEBUG)]
@@ -112,25 +134,45 @@ impl DatabaseStorage for FileMemoryStorage {
         page_idx: usize,
         buffer: Arc<RefCell<Buffer>>,
         c: Completion,
-    ) -> Result<()> {
+    ) -> Result<Completion> {
         let buffer_size = buffer.borrow().len();
         assert!(buffer_size >= 512);
         assert!(buffer_size <= 65536);
         assert_eq!(buffer_size & (buffer_size - 1), 0);
         let pos = (page_idx - 1) * buffer_size;
-        self.file.pwrite(pos, buffer, c.into())?;
-        Ok(())
+        self.file.pwrite(pos, buffer, c)
+    }
+
+    fn write_pages(
+        &self,
+        page_idx: usize,
+        page_size: usize,
+        buffer: Vec<Arc<RefCell<Buffer>>>,
+        c: Completion,
+    ) -> Result<Completion> {
+        assert!(page_idx > 0);
+        assert!(page_size >= 512);
+        assert!(page_size <= 65536);
+        assert_eq!(page_size & (page_size - 1), 0);
+        let pos = (page_idx - 1) * page_size;
+        let c = self.file.pwritev(pos, buffer, c)?;
+        Ok(c)
     }
 
     #[instrument(skip_all, level = Level::DEBUG)]
-    fn sync(&self, c: Completion) -> Result<()> {
-        let _ = self.file.sync(c.into())?;
-        Ok(())
+    fn sync(&self, c: Completion) -> Result<Completion> {
+        self.file.sync(c)
     }
 
     #[instrument(skip_all, level = Level::DEBUG)]
     fn size(&self) -> Result<u64> {
         self.file.size()
+    }
+
+    #[instrument(skip_all, level = Level::INFO)]
+    fn truncate(&self, len: usize, c: Completion) -> Result<Completion> {
+        let c = self.file.truncate(len, c)?;
+        Ok(c)
     }
 }
 

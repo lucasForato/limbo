@@ -25,14 +25,14 @@ pub struct VirtualTable {
 }
 
 impl VirtualTable {
-    pub(crate) fn readonly(self: &Rc<VirtualTable>) -> bool {
+    pub(crate) fn readonly(self: &Arc<VirtualTable>) -> bool {
         match &self.vtab_type {
             VirtualTableType::Pragma(_) => true,
             VirtualTableType::External(table) => table.readonly(),
         }
     }
 
-    pub(crate) fn builtin_functions() -> Vec<Rc<VirtualTable>> {
+    pub(crate) fn builtin_functions() -> Vec<Arc<VirtualTable>> {
         PragmaVirtualTable::functions()
             .into_iter()
             .map(|(tab, schema)| {
@@ -43,12 +43,12 @@ impl VirtualTable {
                     kind: VTabKind::TableValuedFunction,
                     vtab_type: VirtualTableType::Pragma(tab),
                 };
-                Rc::new(vtab)
+                Arc::new(vtab)
             })
             .collect()
     }
 
-    pub(crate) fn function(name: &str, syms: &SymbolTable) -> crate::Result<Rc<VirtualTable>> {
+    pub(crate) fn function(name: &str, syms: &SymbolTable) -> crate::Result<Arc<VirtualTable>> {
         let module = syms.vtab_modules.get(name);
         let (vtab_type, schema) = if module.is_some() {
             ExtVirtualTable::create(name, module, Vec::new(), VTabKind::TableValuedFunction)
@@ -65,7 +65,7 @@ impl VirtualTable {
             kind: VTabKind::TableValuedFunction,
             vtab_type,
         };
-        Ok(Rc::new(vtab))
+        Ok(Arc::new(vtab))
     }
 
     pub fn table(
@@ -73,7 +73,7 @@ impl VirtualTable {
         module_name: &str,
         args: Vec<turso_ext::Value>,
         syms: &SymbolTable,
-    ) -> crate::Result<Rc<VirtualTable>> {
+    ) -> crate::Result<Arc<VirtualTable>> {
         let module = syms.vtab_modules.get(module_name);
         let (table, schema) =
             ExtVirtualTable::create(module_name, module, args, VTabKind::VirtualTable)?;
@@ -83,7 +83,7 @@ impl VirtualTable {
             kind: VTabKind::VirtualTable,
             vtab_type: VirtualTableType::External(table),
         };
-        Ok(Rc::new(vtab))
+        Ok(Arc::new(vtab))
     }
 
     fn resolve_columns(schema: String) -> crate::Result<Vec<Column>> {

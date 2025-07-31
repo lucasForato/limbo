@@ -89,8 +89,8 @@ impl<T: fmt::Write> TokenStream for WriteTokenStream<'_, T> {
 struct BlankContext;
 
 impl ToSqlContext for BlankContext {
-    fn get_column_name(&self, _table_id: crate::ast::TableInternalId, _col_idx: usize) -> &str {
-        ""
+    fn get_column_name(&self, _table_id: crate::ast::TableInternalId, _col_idx: usize) -> String {
+        "".to_string()
     }
 
     fn get_table_name(&self, _id: crate::ast::TableInternalId) -> &str {
@@ -758,7 +758,7 @@ impl ToTokens for Expr {
             Self::Column { table, column, .. } => {
                 s.append(TK_ID, Some(context.get_table_name(*table)))?;
                 s.append(TK_DOT, None)?;
-                s.append(TK_ID, Some(context.get_column_name(*table, *column)))
+                s.append(TK_ID, Some(&context.get_column_name(*table, *column)))
             }
             Self::InList { lhs, not, rhs } => {
                 lhs.to_tokens_with_context(s, context)?;

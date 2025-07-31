@@ -14,15 +14,52 @@ use std::{
 pub trait File: Send + Sync {
     fn lock_file(&self, exclusive: bool) -> Result<()>;
     fn unlock_file(&self) -> Result<()>;
-    fn pread(&self, pos: usize, c: Arc<Completion>) -> Result<Arc<Completion>>;
-    fn pwrite(
+    fn pread(&self, pos: usize, c: Completion) -> Result<Completion>;
+    fn pwrite(&self, pos: usize, buffer: Arc<RefCell<Buffer>>, c: Completion)
+        -> Result<Completion>;
+    fn sync(&self, c: Completion) -> Result<Completion>;
+    fn pwritev(
         &self,
         pos: usize,
-        buffer: Arc<RefCell<Buffer>>,
-        c: Arc<Completion>,
-    ) -> Result<Arc<Completion>>;
-    fn sync(&self, c: Arc<Completion>) -> Result<Arc<Completion>>;
+        buffers: Vec<Arc<RefCell<Buffer>>>,
+        c: Completion,
+    ) -> Result<Completion> {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        if buffers.is_empty() {
+            c.complete(0);
+            return Ok(c);
+        }
+        // naive default implementation can be overridden on backends where it makes sense to
+        let mut pos = pos;
+        let outstanding = Arc::new(AtomicUsize::new(buffers.len()));
+        let total_written = Arc::new(AtomicUsize::new(0));
+
+        for buf in buffers {
+            let len = buf.borrow().len();
+            let child_c = {
+                let c_main = c.clone();
+                let outstanding = outstanding.clone();
+                let total_written = total_written.clone();
+                Completion::new_write(move |n| {
+                    // accumulate bytes actually reported by the backend
+                    total_written.fetch_add(n as usize, Ordering::Relaxed);
+                    if outstanding.fetch_sub(1, Ordering::AcqRel) == 1 {
+                        // last one finished
+                        c_main.complete(total_written.load(Ordering::Acquire) as i32);
+                    }
+                })
+            };
+            if let Err(e) = self.pwrite(pos, buf.clone(), child_c) {
+                // best-effort: mark as done so caller won't wait forever
+                c.complete(-1);
+                return Err(e);
+            }
+            pos += len;
+        }
+        Ok(c)
+    }
     fn size(&self) -> Result<u64>;
+    fn truncate(&self, len: usize, c: Completion) -> Result<Completion>;
 }
 
 #[derive(Debug, Copy, Clone, PartialEq)]
@@ -47,7 +84,7 @@ pub trait IO: Clock + Send + Sync {
 
     fn run_once(&self) -> Result<()>;
 
-    fn wait_for_completion(&self, c: Arc<Completion>) -> Result<()>;
+    fn wait_for_completion(&self, c: Completion) -> Result<()>;
 
     fn generate_random_number(&self) -> i64;
 
@@ -57,8 +94,15 @@ pub trait IO: Clock + Send + Sync {
 pub type Complete = dyn Fn(Arc<RefCell<Buffer>>, i32);
 pub type WriteComplete = dyn Fn(i32);
 pub type SyncComplete = dyn Fn(i32);
+pub type TruncateComplete = dyn Fn(i32);
 
+#[must_use]
+#[derive(Clone)]
 pub struct Completion {
+    inner: Arc<CompletionInner>,
+}
+
+struct CompletionInner {
     pub completion_type: CompletionType,
     is_completed: Cell<bool>,
 }
@@ -67,6 +111,7 @@ pub enum CompletionType {
     Read(ReadCompletion),
     Write(WriteCompletion),
     Sync(SyncCompletion),
+    Truncate(TruncateCompletion),
 }
 
 pub struct ReadCompletion {
@@ -77,8 +122,10 @@ pub struct ReadCompletion {
 impl Completion {
     pub fn new(completion_type: CompletionType) -> Self {
         Self {
-            completion_type,
-            is_completed: Cell::new(false),
+            inner: Arc::new(CompletionInner {
+                completion_type,
+                is_completed: Cell::new(false),
+            }),
         }
     }
 
@@ -109,24 +156,42 @@ impl Completion {
         ))))
     }
 
+    pub fn new_trunc<F>(complete: F) -> Self
+    where
+        F: Fn(i32) + 'static,
+    {
+        Self::new(CompletionType::Truncate(TruncateCompletion::new(Box::new(
+            complete,
+        ))))
+    }
     pub fn is_completed(&self) -> bool {
-        self.is_completed.get()
+        self.inner.is_completed.get()
     }
 
     pub fn complete(&self, result: i32) {
-        match &self.completion_type {
+        match &self.inner.completion_type {
             CompletionType::Read(r) => r.complete(result),
             CompletionType::Write(w) => w.complete(result),
             CompletionType::Sync(s) => s.complete(result), // fix
+            CompletionType::Truncate(t) => t.complete(result),
         };
-        self.is_completed.set(true);
+        self.inner.is_completed.set(true);
     }
 
     /// only call this method if you are sure that the completion is
     /// a ReadCompletion, panics otherwise
     pub fn as_read(&self) -> &ReadCompletion {
-        match self.completion_type {
+        match self.inner.completion_type {
             CompletionType::Read(ref r) => r,
+            _ => unreachable!(),
+        }
+    }
+
+    /// only call this method if you are sure that the completion is
+    /// a WriteCompletion, panics otherwise
+    pub fn as_write(&self) -> &WriteCompletion {
+        match self.inner.completion_type {
+            CompletionType::Write(ref w) => w,
             _ => unreachable!(),
         }
     }
@@ -170,6 +235,20 @@ impl WriteCompletion {
 
 impl SyncCompletion {
     pub fn new(complete: Box<SyncComplete>) -> Self {
+        Self { complete }
+    }
+
+    pub fn complete(&self, res: i32) {
+        (self.complete)(res);
+    }
+}
+
+pub struct TruncateCompletion {
+    pub complete: Box<TruncateComplete>,
+}
+
+impl TruncateCompletion {
+    pub fn new(complete: Box<TruncateComplete>) -> Self {
         Self { complete }
     }
 
@@ -265,10 +344,10 @@ cfg_block! {
         pub use unix::UnixIO as PlatformIO;
     }
 
-    #[cfg(target_os = "windows")] {
+     #[cfg(target_os = "windows")] {
         mod windows;
         pub use windows::WindowsIO as PlatformIO;
-        pub use PlatformIO as SyscallIO;
+         pub use PlatformIO as SyscallIO;
     }
 
     #[cfg(not(any(target_os = "linux", target_os = "macos", target_os = "windows", target_os = "android", target_os = "ios")))] {

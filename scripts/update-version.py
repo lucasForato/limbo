@@ -20,7 +20,7 @@ NPM_PACKAGES = [
     "bindings/javascript/npm/darwin-universal",
     "bindings/javascript/npm/linux-x64-gnu",
     "bindings/javascript/npm/win32-x64-msvc",
-    "bindings/wasm",
+    "bindings/javascript/npm/wasm32-wasip1-threads",
 ]
 
 

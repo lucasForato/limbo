@@ -53,8 +53,11 @@ impl IO for MemoryIO {
         Ok(())
     }
 
-    fn wait_for_completion(&self, _c: Arc<Completion>) -> Result<()> {
-        todo!();
+    fn wait_for_completion(&self, c: Completion) -> Result<()> {
+        while !c.is_completed() {
+            self.run_once()?;
+        }
+        Ok(())
     }
 
     fn generate_random_number(&self) -> i64 {
@@ -83,7 +86,7 @@ impl File for MemoryFile {
         Ok(())
     }
 
-    fn pread(&self, pos: usize, c: Arc<Completion>) -> Result<Arc<Completion>> {
+    fn pread(&self, pos: usize, c: Completion) -> Result<Completion> {
         let r = c.as_read();
         let buf_len = r.buf().len();
         if buf_len == 0 {
@@ -128,8 +131,8 @@ impl File for MemoryFile {
         &self,
         pos: usize,
         buffer: Arc<RefCell<Buffer>>,
-        c: Arc<Completion>,
-    ) -> Result<Arc<Completion>> {
+        c: Completion,
+    ) -> Result<Completion> {
         let buf = buffer.borrow();
         let buf_len = buf.len();
         if buf_len == 0 {
@@ -165,9 +168,65 @@ impl File for MemoryFile {
         Ok(c)
     }
 
-    fn sync(&self, c: Arc<Completion>) -> Result<Arc<Completion>> {
+    fn sync(&self, c: Completion) -> Result<Completion> {
         // no-op
         c.complete(0);
+        Ok(c)
+    }
+
+    fn truncate(&self, len: usize, c: Completion) -> Result<Completion> {
+        if len < self.size.get() {
+            // Truncate pages
+            unsafe {
+                let pages = &mut *self.pages.get();
+                pages.retain(|&k, _| k * PAGE_SIZE < len);
+            }
+        }
+        self.size.set(len);
+        c.complete(0);
+        Ok(c)
+    }
+
+    fn pwritev(
+        &self,
+        pos: usize,
+        buffers: Vec<Arc<RefCell<Buffer>>>,
+        c: Completion,
+    ) -> Result<Completion> {
+        let mut offset = pos;
+        let mut total_written = 0;
+
+        for buffer in buffers {
+            let buf = buffer.borrow();
+            let buf_len = buf.len();
+            if buf_len == 0 {
+                continue;
+            }
+
+            let mut remaining = buf_len;
+            let mut buf_offset = 0;
+            let data = &buf.as_slice();
+
+            while remaining > 0 {
+                let page_no = offset / PAGE_SIZE;
+                let page_offset = offset % PAGE_SIZE;
+                let bytes_to_write = remaining.min(PAGE_SIZE - page_offset);
+
+                {
+                    let page = self.get_or_allocate_page(page_no);
+                    page[page_offset..page_offset + bytes_to_write]
+                        .copy_from_slice(&data[buf_offset..buf_offset + bytes_to_write]);
+                }
+
+                offset += bytes_to_write;
+                buf_offset += bytes_to_write;
+                remaining -= bytes_to_write;
+            }
+            total_written += buf_len;
+        }
+        c.complete(total_written as i32);
+        self.size
+            .set(core::cmp::max(pos + total_written, self.size.get()));
         Ok(c)
     }
 

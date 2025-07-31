@@ -2,6 +2,7 @@ use crate::{
     ext::{register_aggregate_function, register_scalar_function, register_vtab_module},
     Connection, LimboError,
 };
+#[cfg(not(target_family = "wasm"))]
 use libloading::{Library, Symbol};
 use std::{
     ffi::{c_char, CString},
@@ -9,8 +10,11 @@ use std::{
 };
 use turso_ext::{ExtensionApi, ExtensionApiRef, ExtensionEntryPoint, ResultCode, VfsImpl};
 
+#[cfg(not(target_family = "wasm"))]
 type ExtensionStore = Vec<(Arc<Library>, ExtensionApiRef)>;
+#[cfg(not(target_family = "wasm"))]
 static EXTENSIONS: OnceLock<Arc<Mutex<ExtensionStore>>> = OnceLock::new();
+#[cfg(not(target_family = "wasm"))]
 pub fn get_extension_libraries() -> Arc<Mutex<ExtensionStore>> {
     EXTENSIONS
         .get_or_init(|| Arc::new(Mutex::new(Vec::new())))
@@ -29,6 +33,7 @@ unsafe impl Send for VfsMod {}
 unsafe impl Sync for VfsMod {}
 
 impl Connection {
+    #[cfg(not(target_family = "wasm"))]
     pub fn load_extension<P: AsRef<std::ffi::OsStr>>(
         self: &Arc<Connection>,
         path: P,

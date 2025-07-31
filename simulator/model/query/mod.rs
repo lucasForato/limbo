@@ -119,7 +119,7 @@ impl ToSqlContext for EmptyContext {
         &self,
         _table_id: turso_sqlite3_parser::ast::TableInternalId,
         _col_idx: usize,
-    ) -> &str {
+    ) -> String {
         unreachable!()
     }
 

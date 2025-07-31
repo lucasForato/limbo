@@ -455,8 +455,7 @@ async fn main() -> Result<(), Box<dyn std::error::Error + Send + Sync>> {
 
     let opts = Opts::parse();
     if opts.nr_threads > 1 {
-        println!("ERROR: Multi-threaded data access is not yet supported: https://github.com/tursodatabase/turso/issues/1552");
-        return Ok(());
+        println!("WARNING: Multi-threaded data access is not yet supported: https://github.com/tursodatabase/turso/issues/1552");
     }
 
     let plan = if opts.load_log {

@@ -35,7 +35,7 @@ impl IO for GenericIO {
         }))
     }
 
-    fn wait_for_completion(&self, c: Arc<Completion>) -> Result<()> {
+    fn wait_for_completion(&self, c: Completion) -> Result<()> {
         while !c.is_completed() {
             self.run_once()?;
         }
@@ -86,14 +86,11 @@ impl File for GenericFile {
         Ok(())
     }
 
-    fn pread(&self, pos: usize, c: Arc<Completion>) -> Result<Arc<Completion>> {
+    fn pread(&self, pos: usize, c: Completion) -> Result<Completion> {
         let mut file = self.file.borrow_mut();
         file.seek(std::io::SeekFrom::Start(pos as u64))?;
         {
-            let r = match c.completion_type {
-                CompletionType::Read(ref r) => r,
-                _ => unreachable!(),
-            };
+            let r = c.as_read();
             let mut buf = r.buf_mut();
             let buf = buf.as_mut_slice();
             file.read_exact(buf)?;
@@ -106,8 +103,8 @@ impl File for GenericFile {
         &self,
         pos: usize,
         buffer: Arc<RefCell<crate::Buffer>>,
-        c: Arc<Completion>,
-    ) -> Result<Arc<Completion>> {
+        c: Completion,
+    ) -> Result<Completion> {
         let mut file = self.file.borrow_mut();
         file.seek(std::io::SeekFrom::Start(pos as u64))?;
         let buf = buffer.borrow();
@@ -117,9 +114,17 @@ impl File for GenericFile {
         Ok(c)
     }
 
-    fn sync(&self, c: Arc<Completion>) -> Result<Arc<Completion>> {
+    fn sync(&self, c: Completion) -> Result<Completion> {
         let mut file = self.file.borrow_mut();
         file.sync_all().map_err(|err| LimboError::IOError(err))?;
+        c.complete(0);
+        Ok(c)
+    }
+
+    fn truncate(&self, len: usize, c: Completion) -> Result<Completion> {
+        let mut file = self.file.borrow_mut();
+        file.set_len(len as u64)
+            .map_err(|err| LimboError::IOError(err))?;
         c.complete(0);
         Ok(c)
     }

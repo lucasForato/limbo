@@ -78,3 +78,11 @@ passionate_robin
 faithful_thomas
 vibrant_miroslav
 sparkling_gray}
+
+do_execsql_test_on_specific_db {:memory:} doubly-qualified-delete {
+   create table test(col);
+   insert into test(col) values (1);
+   insert into test(col) values (2);
+   delete from test where main.test.col = 2;
+   select col from test;
+} {1}

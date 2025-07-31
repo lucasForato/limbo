@@ -490,7 +490,7 @@ fn generate_join_bitmasks(table_number_max_exclusive: usize, how_many: usize) ->
 
 #[cfg(test)]
 mod tests {
-    use std::{cell::Cell, rc::Rc, sync::Arc};
+    use std::{cell::Cell, sync::Arc};
 
     use turso_sqlite3_parser::ast::{self, Expr, Operator, SortOrder, TableInternalId};
 
@@ -1640,8 +1640,8 @@ mod tests {
     }
 
     /// Creates a BTreeTable with the given name and columns
-    fn _create_btree_table(name: &str, columns: Vec<Column>) -> Rc<BTreeTable> {
-        Rc::new(BTreeTable {
+    fn _create_btree_table(name: &str, columns: Vec<Column>) -> Arc<BTreeTable> {
+        Arc::new(BTreeTable {
             root_page: 1, // Page number doesn't matter for tests
             name: name.to_string(),
             primary_key_columns: vec![],
@@ -1654,7 +1654,7 @@ mod tests {
 
     /// Creates a TableReference for a BTreeTable
     fn _create_table_reference(
-        table: Rc<BTreeTable>,
+        table: Arc<BTreeTable>,
         join_info: Option<JoinInfo>,
         internal_id: TableInternalId,
     ) -> JoinedTable {

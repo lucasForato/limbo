@@ -82,7 +82,6 @@ impl Text {
             subtype: TextSubtype::Text,
         }
     }
-
     #[cfg(feature = "json")]
     pub fn json(value: String) -> Self {
         Self {
@@ -93,6 +92,63 @@ impl Text {
 
     pub fn as_str(&self) -> &str {
         unsafe { std::str::from_utf8_unchecked(self.value.as_ref()) }
+    }
+}
+
+pub trait Extendable<T> {
+    fn do_extend(&mut self, other: &T);
+}
+
+impl<T: AnyText> Extendable<T> for Text {
+    fn do_extend(&mut self, other: &T) {
+        self.value.clear();
+        self.value.extend_from_slice(other.as_ref().as_bytes());
+        self.subtype = other.subtype();
+    }
+}
+
+impl<T: AnyBlob> Extendable<T> for Vec<u8> {
+    fn do_extend(&mut self, other: &T) {
+        self.clear();
+        self.extend_from_slice(other.as_slice());
+    }
+}
+
+pub trait AnyText: AsRef<str> {
+    fn subtype(&self) -> TextSubtype;
+}
+
+impl AsRef<str> for TextRef {
+    fn as_ref(&self) -> &str {
+        self.as_str()
+    }
+}
+
+impl AnyText for Text {
+    fn subtype(&self) -> TextSubtype {
+        self.subtype
+    }
+}
+
+impl AnyText for TextRef {
+    fn subtype(&self) -> TextSubtype {
+        self.subtype
+    }
+}
+
+pub trait AnyBlob {
+    fn as_slice(&self) -> &[u8];
+}
+
+impl AnyBlob for RawSlice {
+    fn as_slice(&self) -> &[u8] {
+        self.to_slice()
+    }
+}
+
+impl AnyBlob for Vec<u8> {
+    fn as_slice(&self) -> &[u8] {
+        self.as_slice()
     }
 }
 
@@ -117,6 +173,12 @@ impl From<String> for Text {
             value: value.into_bytes(),
             subtype: TextSubtype::Text,
         }
+    }
+}
+
+impl From<Text> for String {
+    fn from(value: Text) -> Self {
+        String::from_utf8(value.value).unwrap()
     }
 }
 
@@ -257,6 +319,20 @@ impl Value {
         match self {
             Value::Blob(b) => b,
             _ => panic!("as_blob must be called only for Value::Blob"),
+        }
+    }
+    pub fn as_float(&self) -> f64 {
+        match self {
+            Value::Float(f) => *f,
+            Value::Integer(i) => *i as f64,
+            _ => panic!("as_float must be called only for Value::Float or Value::Integer"),
+        }
+    }
+
+    pub fn as_int(&self) -> Option<i64> {
+        match self {
+            Value::Integer(i) => Some(*i),
+            _ => None,
         }
     }
 
@@ -496,9 +572,25 @@ impl Value {
 }
 
 #[derive(Debug, Clone, PartialEq)]
+pub struct SumAggState {
+    pub r_err: f64,   // Error term for Kahan-Babushka-Neumaier summation
+    pub approx: bool, // True if any non-integer value was input to the sum
+    pub ovrfl: bool,  // Integer overflow seen
+}
+impl Default for SumAggState {
+    fn default() -> Self {
+        Self {
+            r_err: 0.0,
+            approx: false,
+            ovrfl: false,
+        }
+    }
+}
+
+#[derive(Debug, Clone, PartialEq)]
 pub enum AggContext {
     Avg(Value, Value), // acc and count
-    Sum(Value, bool),  // acc and has_non_numeric
+    Sum(Value, SumAggState),
     Count(Value),
     Max(Option<Value>),
     Min(Option<Value>),
@@ -874,6 +966,12 @@ impl ImmutableRecord {
     pub fn new(payload_capacity: usize) -> Self {
         Self {
             payload: Value::Blob(Vec::with_capacity(payload_capacity)),
+        }
+    }
+
+    pub fn from_bin_record(payload: Vec<u8>) -> Self {
+        Self {
+            payload: Value::Blob(payload),
         }
     }
 
@@ -2244,6 +2342,7 @@ impl Cursor {
 }
 
 #[derive(Debug)]
+#[must_use]
 pub enum IOResult<T> {
     Done(T),
     IO,
@@ -2354,6 +2453,28 @@ impl RawSlice {
             unsafe { std::slice::from_raw_parts(self.data, self.len) }
         }
     }
+}
+
+#[derive(Debug)]
+pub enum DatabaseChangeType {
+    Delete,
+    Update { bin_record: Vec<u8> },
+    Insert { bin_record: Vec<u8> },
+}
+
+#[derive(Debug)]
+pub struct DatabaseChange {
+    pub change_id: i64,
+    pub change_time: u64,
+    pub change: DatabaseChangeType,
+    pub table_name: String,
+    pub id: i64,
+}
+
+#[derive(Debug)]
+pub struct WalInsertInfo {
+    pub page_no: usize,
+    pub is_commit: bool,
 }
 
 #[cfg(test)]

@@ -337,6 +337,7 @@ fn prepare_one_select_plan(
                             expr,
                             &mut plan.table_references,
                             Some(&plan.result_columns),
+                            connection,
                         )?;
                         match expr {
                             ast::Expr::FunctionCall {
@@ -530,6 +531,7 @@ fn prepare_one_select_plan(
                 &mut plan.table_references,
                 Some(&plan.result_columns),
                 &mut plan.where_clause,
+                connection,
             )?;
 
             if let Some(mut group_by) = group_by {
@@ -539,6 +541,7 @@ fn prepare_one_select_plan(
                         expr,
                         &mut plan.table_references,
                         Some(&plan.result_columns),
+                        connection,
                     )?;
                 }
 
@@ -553,6 +556,7 @@ fn prepare_one_select_plan(
                                 expr,
                                 &mut plan.table_references,
                                 Some(&plan.result_columns),
+                                connection,
                             )?;
                             let contains_aggregates =
                                 resolve_aggregates(schema, expr, &mut aggregate_expressions)?;
@@ -589,6 +593,7 @@ fn prepare_one_select_plan(
                         &mut o.expr,
                         &mut plan.table_references,
                         Some(&plan.result_columns),
+                        connection,
                     )?;
                     resolve_aggregates(schema, &o.expr, &mut plan.aggregates)?;
 

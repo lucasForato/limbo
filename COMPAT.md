@@ -64,7 +64,7 @@ Turso aims to be fully compatible with SQLite, with opt-in features not supporte
 | CREATE VIEW               | No      |                                                                                   |
 | CREATE VIRTUAL TABLE      | Yes     |                                                                                   |
 | DELETE                    | Yes     |                                                                                   |
-| DETACH DATABASE           | No      |                                                                                   |
+| DETACH DATABASE           | Yes     |                                                                                   |
 | DROP INDEX                | Partial | Disabled by default.                                                              |
 | DROP TABLE                | Yes     |                                                                                   |
 | DROP TRIGGER              | No      |                                                                                   |
@@ -77,7 +77,7 @@ Turso aims to be fully compatible with SQLite, with opt-in features not supporte
 | REINDEX                   | No      |                                                                                   |
 | RELEASE SAVEPOINT         | No      |                                                                                   |
 | REPLACE                   | No      |                                                                                   |
-| RETURNING clause          | No      |                                                                                   |
+| RETURNING clause          | Partial | DELETE is missing                                                                 |
 | ROLLBACK TRANSACTION      | Yes     |                                                                                   |
 | SAVEPOINT                 | No      |                                                                                   |
 | SELECT                    | Yes     |                                                                                   |
@@ -94,7 +94,6 @@ Turso aims to be fully compatible with SQLite, with opt-in features not supporte
 | SELECT ... JOIN USING     | Yes     |                                                                                   |
 | SELECT ... NATURAL JOIN   | Yes     |                                                                                   |
 | UPDATE                    | Yes     |                                                                                   |
-| UPSERT                    | No      |                                                                                   |
 | VACUUM                    | No      |                                                                                   |
 | WITH clause               | Partial | No RECURSIVE, no MATERIALIZED, only SELECT supported in CTEs                      |
 
@@ -123,7 +122,7 @@ Turso aims to be fully compatible with SQLite, with opt-in features not supporte
 | PRAGMA default_cache_size        | Not Needed | deprecated in SQLite                         |
 | PRAGMA defer_foreign_keys        | No         |                                              |
 | PRAGMA empty_result_callbacks    | Not Needed | deprecated in SQLite                         |
-| PRAGMA encoding                  | No         |                                              |
+| PRAGMA encoding                  | Yes        |                                              |
 | PRAGMA foreign_key_check         | No         |                                              |
 | PRAGMA foreign_key_list          | No         |                                              |
 | PRAGMA foreign_keys              | No         |                                              |
@@ -428,24 +427,23 @@ Modifiers:
 | BitOr          | Yes    |         |
 | Blob           | Yes    |         |
 | BeginSubrtn    | Yes    |         |
-| Checkpoint     | No     |         |
+| Cast           | Yes    |         |
+| Checkpoint     | Yes    |         |
 | Clear          | No     |         |
-| Close          | No     |         |
+| Close          | Yes    |         |
 | CollSeq        | No     |         |
 | Column         | Yes    |         |
 | Compare        | Yes    |         |
 | Concat         | Yes    |         |
 | Copy           | Yes    |         |
-| Count          | No     |         |
+| Count          | Yes    |         |
 | CreateBTree    | Partial| no temp databases |
-| CreateTable    | No     |         |
-| CreateTable    | No     |         |
 | DecrJumpZero   | Yes    |         |
-| Delete         | No     |         |
-| Destroy        | No     |         |
+| Delete         | Yes    |         |
+| Destroy        | Yes    |         |
 | Divide         | Yes    |         |
-| DropIndex      | No     |         |
-| DropTable      | No     |         |
+| DropIndex      | Yes    |         |
+| DropTable      | Yes    |         |
 | DropTrigger    | No     |         |
 | EndCoroutine   | Yes    |         |
 | Eq             | Yes    |         |
@@ -453,20 +451,20 @@ Modifiers:
 | Explain        | No     |         |
 | FkCounter      | No     |         |
 | FkIfZero       | No     |         |
-| Found          | No     |         |
+| Found          | Yes    |         |
 | Function       | Yes    |         |
 | Ge             | Yes    |         |
 | Gosub          | Yes    |         |
 | Goto           | Yes    |         |
 | Gt             | Yes    |         |
 | Halt           | Yes    |         |
-| HaltIfNull     | No     |         |
-| IdxDelete      | No     |         |
+| HaltIfNull     | Yes    |         |
+| IdxDelete      | Yes    |         |
 | IdxGE          | Yes    |         |
-| IdxInsert      | Yes     |         |
+| IdxInsert      | Yes    |         |
 | IdxLE          | Yes    |         |
 | IdxLT          | Yes    |         |
-| IdxRowid       | No     |         |
+| IdxRowid       | Yes    |         |
 | If             | Yes    |         |
 | IfNeg          | No     |         |
 | IfNot          | Yes    |         |
@@ -475,23 +473,23 @@ Modifiers:
 | IncrVacuum     | No     |         |
 | Init           | Yes    |         |
 | InitCoroutine  | Yes    |         |
-| Insert         | Yes     |         |
+| Insert         | Yes    |         |
 | InsertInt      | No     |         |
-| Int64          | No     |         |
+| Int64          | Yes    |         |
 | Integer        | Yes    |         |
-| IntegrityCk    | No     |         |
+| IntegrityCk    | Yes    |         |
 | IsNull         | Yes    |         |
 | IsUnique       | No     |         |
 | JournalMode    | No     |         |
 | Jump           | Yes    |         |
-| Last           | No     |         |
+| Last           | Yes    |         |
 | Le             | Yes    |         |
 | LoadAnalysis   | No     |         |
 | Lt             | Yes    |         |
 | MakeRecord     | Yes    |         |
 | MaxPgcnt       | No     |         |
 | MemMax         | No     |         |
-| Move           | No     |         |
+| Move           | Yes    |         |
 | Multiply       | Yes    |         |
 | MustBeInt      | Yes    |         |
 | Ne             | Yes    |         |
@@ -500,7 +498,7 @@ Modifiers:
 | Noop           | Yes     |         |
 | Not            | Yes    |         |
 | NotExists      | Yes    |         |
-| NotFound       | No     |         |
+| NotFound       | Yes    |         |
 | NotNull        | Yes    |         |
 | Null           | Yes    |         |
 | NullRow        | Yes    |         |
@@ -513,7 +511,7 @@ Modifiers:
 | Or             | Yes    |         |
 | Pagecount      | Partial| no temp databases |
 | Param          | No     |         |
-| ParseSchema    | No     |         |
+| ParseSchema    | Yes    |         |
 | Permutation    | No     |         |
 | Prev           | Yes     |         |
 | Program        | No     |         |
@@ -537,12 +535,12 @@ Modifiers:
 | Seek           | No     |         |
 | SeekGe         | Yes    |         |
 | SeekGt         | Yes    |         |
-| SeekLe         | No     |         |
-| SeekLt         | No     |         |
+| SeekLe         | Yes    |         |
+| SeekLt         | Yes    |         |
 | SeekRowid      | Yes    |         |
 | SeekEnd        | Yes    |         |
 | Sequence       | No     |         |
-| SetCookie      | No     |         |
+| SetCookie      | Yes    |         |
 | ShiftLeft      | Yes    |         |
 | ShiftRight     | Yes    |         |
 | SoftNull       | Yes    |         |
@@ -557,11 +555,6 @@ Modifiers:
 | String8        | Yes    |         |
 | Subtract       | Yes    |         |
 | TableLock      | No     |         |
-| ToBlob         | No     |         |
-| ToInt          | No     |         |
-| ToNumeric      | No     |         |
-| ToReal         | No     |         |
-| ToText         | No     |         |
 | Trace          | No     |         |
 | Transaction    | Yes    |         |
 | VBegin         | No     |         |
@@ -574,8 +567,7 @@ Modifiers:
 | VRename        | No     |         |
 | VUpdate        | Yes    |         |
 | Vacuum         | No     |         |
-| Variable       | No     |         |
-| VerifyCookie   | No     |         |
+| Variable       | Yes    |         |
 | Yield          | Yes    |         |
 | ZeroOrNull     | Yes    |         |
 
@@ -634,6 +626,8 @@ The `vector` extension is compatible with libSQL native vector search.
 | vector_extract(x)                              | Yes    |         |
 | vector_distance_cos(x, y)                      | Yes    |         |
 | vector_distance_l2(x, y)                              | Yes    |Euclidean distance|
+| vector_concat(x, y)                            | Yes    |         |
+| vector_slice(x, start_index, end_index)        | Yes    |         |
 
 ### Time
 

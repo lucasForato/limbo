@@ -1,4 +1,4 @@
-import { Connection, connect, type Config as TursoConfig } from './connection.js';
+import { Session, type SessionConfig } from './session.js';
 import { DatabaseError } from './error.js';
 
 /**
@@ -127,17 +127,17 @@ export interface Client {
 }
 
 class LibSQLClient implements Client {
-  private connection: Connection;
+  private session: Session;
   private _closed = false;
 
   constructor(config: Config) {
     this.validateConfig(config);
     
-    const tursoConfig: TursoConfig = {
+    const sessionConfig: SessionConfig = {
       url: config.url,
       authToken: config.authToken || ''
     };
-    this.connection = connect(tursoConfig);
+    this.session = new Session(sessionConfig);
   }
 
   private validateConfig(config: Config): void {
@@ -246,8 +246,15 @@ class LibSQLClient implements Client {
         normalizedStmt = this.normalizeStatement(stmtOrSql);
       }
 
-      const result = await this.connection.execute(normalizedStmt.sql, normalizedStmt.args);
-      return this.convertResult(result);
+      await this.session.sequence(normalizedStmt.sql);
+      // Return empty result set for sequence execution
+      return this.convertResult({
+        columns: [],
+        columnTypes: [],
+        rows: [],
+        rowsAffected: 0,
+        lastInsertRowid: undefined
+      });
     } catch (error: any) {
       throw new LibsqlError(error.message, "EXECUTE_ERROR");
     }
@@ -264,7 +271,7 @@ class LibSQLClient implements Client {
         return normalized.sql; // For now, ignore args in batch
       });
 
-      const result = await this.connection.batch(sqlStatements, mode);
+      const result = await this.session.batch(sqlStatements);
       
       // Return array of result sets (simplified - actual implementation would be more complex)
       return [this.convertResult(result)];
@@ -283,7 +290,15 @@ class LibSQLClient implements Client {
   }
 
   async executeMultiple(sql: string): Promise<void> {
-    throw new LibsqlError("Execute multiple not implemented", "NOT_IMPLEMENTED");
+    try {
+      if (this._closed) {
+        throw new LibsqlError("Client is closed", "CLIENT_CLOSED");
+      }
+      
+      await this.session.sequence(sql);
+    } catch (error: any) {
+      throw new LibsqlError(error.message, "EXECUTE_MULTIPLE_ERROR");
+    }
   }
 
   async sync(): Promise<any> {
@@ -292,6 +307,11 @@ class LibSQLClient implements Client {
 
   close(): void {
     this._closed = true;
+    // Note: The libSQL client interface expects synchronous close,
+    // but our underlying session needs async close. We'll fire and forget.
+    this.session.close().catch(error => {
+      console.error('Error closing session:', error);
+    });
   }
 }
 

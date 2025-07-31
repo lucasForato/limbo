@@ -9,7 +9,7 @@
 //! The instruction set of the VDBE is similar to SQLite's instruction set,
 //! but with the exception that bytecodes that perform I/O operations are
 //! return execution back to the caller instead of blocking. This is because
-//! Limbo is designed for applications that need high concurrency such as
+//! Turso is designed for applications that need high concurrency such as
 //! serverless runtimes. In addition, asynchronous I/O makes storage
 //! disaggregation easier.
 //!
@@ -27,7 +27,7 @@ pub mod sorter;
 use crate::{
     error::LimboError,
     function::{AggFunc, FuncCtx},
-    storage::{pager, sqlite3_ondisk::SmallVec},
+    storage::sqlite3_ondisk::SmallVec,
     translate::plan::TableReferences,
     types::{IOResult, RawSlice, TextRef},
     vdbe::execute::{OpIdxInsertState, OpInsertState, OpNewRowidState, OpSeekState},
@@ -398,7 +398,10 @@ impl Program {
                 // Connection is closed for whatever reason, rollback the transaction.
                 let state = self.connection.transaction_state.get();
                 if let TransactionState::Write { schema_did_change } = state {
-                    pager.rollback(schema_did_change, &self.connection)?
+                    match pager.end_tx(true, schema_did_change, &self.connection, false)? {
+                        IOResult::IO => return Ok(StepResult::IO),
+                        IOResult::Done(_) => {}
+                    }
                 }
                 return Err(LimboError::InternalError("Connection closed".to_string()));
             }
@@ -481,6 +484,9 @@ impl Program {
                         Ok(StepResult::Done)
                     }
                     TransactionState::None => Ok(StepResult::Done),
+                    TransactionState::PendingUpgrade => {
+                        panic!("Unexpected transaction state: {current_state:?} during auto-commit",)
+                    }
                 }
             } else {
                 if self.change_cnt_on {
@@ -507,12 +513,9 @@ impl Program {
             connection.wal_checkpoint_disabled.get(),
         )?;
         match cacheflush_status {
-            IOResult::Done(status) => {
+            IOResult::Done(_) => {
                 if self.change_cnt_on {
                     self.connection.set_changes(self.n_change.get());
-                }
-                if matches!(status, pager::PagerCommitResult::Rollback) {
-                    pager.rollback(schema_did_change, connection)?;
                 }
                 connection.transaction_state.replace(TransactionState::None);
                 *commit_state = CommitState::Ready;
@@ -758,11 +761,15 @@ pub fn handle_program_error(
         _ => {
             let state = connection.transaction_state.get();
             if let TransactionState::Write { schema_did_change } = state {
-                if let Err(e) = pager.rollback(schema_did_change, connection) {
-                    tracing::error!("rollback failed: {e}");
-                }
-                if let Err(e) = pager.end_tx(false, schema_did_change, connection, false) {
-                    tracing::error!("end_tx failed: {e}");
+                loop {
+                    match pager.end_tx(true, schema_did_change, connection, false) {
+                        Ok(IOResult::IO) => connection.run_once()?,
+                        Ok(IOResult::Done(_)) => break,
+                        Err(e) => {
+                            tracing::error!("end_tx failed: {e}");
+                            break;
+                        }
+                    }
                 }
             } else if let Err(e) = pager.end_read_tx() {
                 tracing::error!("end_read_tx failed: {e}");

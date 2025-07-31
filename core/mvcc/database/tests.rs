@@ -618,7 +618,7 @@ fn test_future_row() {
 }
 
 use crate::mvcc::clock::LogicalClock;
-use crate::mvcc::cursor::{BucketScanCursor, LazyScanCursor, ScanCursor};
+use crate::mvcc::cursor::MvccLazyCursor;
 use crate::mvcc::database::{MvStore, Row, RowID};
 use crate::mvcc::persistent_storage::Storage;
 use std::rc::Rc;
@@ -677,15 +677,15 @@ fn setup_test_db() -> (Rc<MvStore<TestClock>>, u64) {
     (db, tx_id)
 }
 
-fn setup_sequential_db() -> (Rc<MvStore<TestClock>>, u64) {
+fn setup_lazy_db(initial_keys: &[i64]) -> (Rc<MvStore<TestClock>>, u64) {
     let clock = TestClock::new(1);
     let storage = Storage::new_noop();
     let db = Rc::new(MvStore::new(clock, storage));
     let tx_id = db.begin_tx();
 
     let table_id = 1;
-    for i in 1..6 {
-        let id = RowID::new(table_id, i);
+    for i in initial_keys {
+        let id = RowID::new(table_id, *i);
         let data = format!("row{i}").into_bytes();
         let row = Row::new(id, data);
         db.insert(tx_id, row).unwrap();
@@ -699,12 +699,13 @@ fn setup_sequential_db() -> (Rc<MvStore<TestClock>>, u64) {
 
 #[test]
 fn test_lazy_scan_cursor_basic() {
-    let (db, tx_id) = setup_sequential_db();
+    let (db, tx_id) = setup_lazy_db(&[1, 2, 3, 4, 5]);
     let table_id = 1;
 
-    let mut cursor = LazyScanCursor::new(db.clone(), tx_id, table_id).unwrap();
+    let mut cursor = MvccLazyCursor::new(db.clone(), tx_id, table_id).unwrap();
 
     // Check first row
+    assert!(cursor.forward());
     assert!(!cursor.is_empty());
     let row = cursor.current_row().unwrap().unwrap();
     assert_eq!(row.id.row_id, 1);
@@ -730,9 +731,10 @@ fn test_lazy_scan_cursor_with_gaps() {
     let (db, tx_id) = setup_test_db();
     let table_id = 1;
 
-    let mut cursor = LazyScanCursor::new(db.clone(), tx_id, table_id).unwrap();
+    let mut cursor = MvccLazyCursor::new(db.clone(), tx_id, table_id).unwrap();
 
     // Check first row
+    assert!(cursor.forward());
     assert!(!cursor.is_empty());
     let row = cursor.current_row().unwrap().unwrap();
     assert_eq!(row.id.row_id, 5);
@@ -755,73 +757,11 @@ fn test_lazy_scan_cursor_with_gaps() {
 }
 
 #[test]
-fn test_bucket_scan_cursor_basic() {
-    let (db, tx_id) = setup_sequential_db();
+fn test_cursor_basic() {
+    let (db, tx_id) = setup_lazy_db(&[1, 2, 3, 4, 5]);
     let table_id = 1;
 
-    // Create a bucket size that's smaller than the total rows
-    let mut cursor = BucketScanCursor::new(db.clone(), tx_id, table_id, 3).unwrap();
-
-    // Check first row
-    assert!(!cursor.is_empty());
-    let row = cursor.current_row().unwrap().unwrap();
-    assert_eq!(row.id.row_id, 1);
-
-    // Iterate through all rows
-    let mut count = 1;
-    let mut row_ids = Vec::new();
-    row_ids.push(row.id.row_id);
-
-    while cursor.forward() {
-        count += 1;
-        let row = cursor.current_row().unwrap().unwrap();
-        row_ids.push(row.id.row_id);
-    }
-
-    // Should have found 5 rows
-    assert_eq!(count, 5);
-    assert_eq!(row_ids, vec![1, 2, 3, 4, 5]);
-
-    // After the last row, is_empty should return true
-    assert!(cursor.is_empty());
-}
-
-#[test]
-fn test_bucket_scan_cursor_with_gaps() {
-    let (db, tx_id) = setup_test_db();
-    let table_id = 1;
-
-    // Create a bucket size of 2 to force multiple bucket loads
-    let mut cursor = BucketScanCursor::new(db.clone(), tx_id, table_id, 2).unwrap();
-
-    // Check first row
-    assert!(!cursor.is_empty());
-    let row = cursor.current_row().unwrap().unwrap();
-    assert_eq!(row.id.row_id, 5);
-
-    // Test moving forward and checking IDs
-    let expected_ids = [5, 10, 15, 20, 30];
-    let mut row_ids = Vec::new();
-    row_ids.push(row.id.row_id);
-
-    while cursor.forward() {
-        let row = cursor.current_row().unwrap().unwrap();
-        row_ids.push(row.id.row_id);
-    }
-
-    // Should have all expected IDs
-    assert_eq!(row_ids, expected_ids);
-
-    // After the last row, is_empty should return true
-    assert!(cursor.is_empty());
-}
-
-#[test]
-fn test_scan_cursor_basic() {
-    let (db, tx_id) = setup_sequential_db();
-    let table_id = 1;
-
-    let mut cursor = ScanCursor::new(db.clone(), tx_id, table_id).unwrap();
+    let mut cursor = MvccLazyCursor::new(db.clone(), tx_id, table_id).unwrap();
 
     cursor.forward();
 
@@ -855,30 +795,20 @@ fn test_cursor_with_empty_table() {
     let table_id = 1; // Empty table
 
     // Test LazyScanCursor with empty table
-    let cursor = LazyScanCursor::new(db.clone(), tx_id, table_id).unwrap();
-    assert!(cursor.is_empty());
-    assert!(cursor.current_row_id().is_none());
-
-    // Test BucketScanCursor with empty table
-    let cursor = BucketScanCursor::new(db.clone(), tx_id, table_id, 10).unwrap();
-    assert!(cursor.is_empty());
-    assert!(cursor.current_row_id().is_none());
-
-    // Test ScanCursor with empty table
-    let mut cursor = ScanCursor::new(db.clone(), tx_id, table_id).unwrap();
-    cursor.forward();
+    let cursor = MvccLazyCursor::new(db.clone(), tx_id, table_id).unwrap();
     assert!(cursor.is_empty());
     assert!(cursor.current_row_id().is_none());
 }
 
 #[test]
 fn test_cursor_modification_during_scan() {
-    let (db, tx_id) = setup_sequential_db();
+    let (db, tx_id) = setup_lazy_db(&[1, 2, 3, 4, 5]);
     let table_id = 1;
 
-    let mut cursor = LazyScanCursor::new(db.clone(), tx_id, table_id).unwrap();
+    let mut cursor = MvccLazyCursor::new(db.clone(), tx_id, table_id).unwrap();
 
     // Read first row
+    assert!(cursor.forward());
     let first_row = cursor.current_row().unwrap().unwrap();
     assert_eq!(first_row.id.row_id, 1);
 
@@ -888,56 +818,22 @@ fn test_cursor_modification_during_scan() {
     let new_row = Row::new(new_row_id, new_row_data);
 
     cursor.insert(new_row).unwrap();
-
-    // Continue scanning - the cursor should still work correctly
-    cursor.forward(); // Move to 2
-    let row = cursor.current_row().unwrap().unwrap();
-    assert_eq!(row.id.row_id, 2);
-
-    cursor.forward(); // Move to 3 (our new row)
     let row = cursor.current_row().unwrap().unwrap();
     assert_eq!(row.id.row_id, 3);
     assert_eq!(row.data, b"new_row".to_vec());
 
+    // Continue scanning - the cursor should still work correctly
     cursor.forward(); // Move to 4
     let row = cursor.current_row().unwrap().unwrap();
     assert_eq!(row.id.row_id, 4);
-}
 
-#[test]
-fn test_bucket_scan_cursor_next_bucket() {
-    let (db, tx_id) = setup_test_db();
-    let table_id = 1;
-
-    // Create a bucket size of 1 to force bucket loading for each row
-    let mut cursor = BucketScanCursor::new(db.clone(), tx_id, table_id, 1).unwrap();
-
-    // Get the first row
-    assert!(!cursor.is_empty());
+    cursor.forward(); // Move to 5 (our new row)
     let row = cursor.current_row().unwrap().unwrap();
     assert_eq!(row.id.row_id, 5);
-
-    // Move to the next row - this should trigger next_bucket()
-    assert!(cursor.forward());
-    let row = cursor.current_row().unwrap().unwrap();
-    assert_eq!(row.id.row_id, 10);
-
-    // Move to the next row again
-    assert!(cursor.forward());
-    let row = cursor.current_row().unwrap().unwrap();
-    assert_eq!(row.id.row_id, 15);
-
-    // Continue to the end
-    assert!(cursor.forward());
-    assert_eq!(cursor.current_row().unwrap().unwrap().id.row_id, 20);
-
-    assert!(cursor.forward());
-    assert_eq!(cursor.current_row().unwrap().unwrap().id.row_id, 30);
-
-    // Should be no more rows
     assert!(!cursor.forward());
     assert!(cursor.is_empty());
 }
+
 /* States described in the Hekaton paper *for serializability*:
 
 Table 1: Case analysis of action to take when version V’s
@@ -1005,7 +901,7 @@ fn test_snapshot_isolation_tx_visible1() {
     ]);
 
     let current_tx = new_tx(4, 4, TransactionState::Preparing);
-    let current_tx = current_tx.read().unwrap();
+    let current_tx = current_tx.read();
 
     let rv_visible = |begin: TxTimestampOrID, end: Option<TxTimestampOrID>| {
         let row_version = RowVersion {

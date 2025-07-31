@@ -1,7 +1,7 @@
 // This module contains code for emitting bytecode instructions for SQL query execution.
 // It handles translating high-level SQL operations into low-level bytecode that can be executed by the virtual machine.
 
-use std::rc::Rc;
+use std::sync::Arc;
 
 use tracing::{instrument, Level};
 use turso_sqlite3_parser::ast::{self, Expr};
@@ -24,6 +24,7 @@ use crate::error::SQLITE_CONSTRAINT_PRIMARYKEY;
 use crate::function::Func;
 use crate::schema::{Schema, Table};
 use crate::translate::compound_select::emit_program_for_compound_select;
+use crate::translate::expr::{emit_returning_results, ReturningValueRegisters};
 use crate::translate::plan::{DeletePlan, Plan, QueryDestination, Search};
 use crate::translate::values::emit_values;
 use crate::util::exprs_are_equivalent;
@@ -265,7 +266,7 @@ pub fn emit_query<'a>(
     t_ctx: &mut TranslateCtx<'a>,
 ) -> Result<usize> {
     if !plan.values.is_empty() {
-        let reg_result_cols_start = emit_values(program, plan, &t_ctx.resolver)?;
+        let reg_result_cols_start = emit_values(program, plan, &t_ctx.resolver, t_ctx.limit_ctx)?;
         return Ok(reg_result_cols_start);
     }
 
@@ -453,7 +454,12 @@ fn emit_program_for_delete(
         None,
     )?;
 
-    emit_delete_insns(program, &mut t_ctx, &plan.table_references)?;
+    emit_delete_insns(
+        program,
+        &mut t_ctx,
+        &plan.table_references,
+        &plan.result_columns,
+    )?;
 
     // Clean up and close the main execution loop
     close_loop(
@@ -476,6 +482,7 @@ fn emit_delete_insns(
     program: &mut ProgramBuilder,
     t_ctx: &mut TranslateCtx,
     table_references: &TableReferences,
+    result_columns: &[super::plan::ResultSetColumn],
 ) -> Result<()> {
     let table_reference = table_references.joined_tables().first().unwrap();
     if table_reference
@@ -605,6 +612,33 @@ fn emit_delete_insns(
                 None,
                 table_reference.table.get_name(),
             )?;
+        }
+
+        // Emit RETURNING results if specified (must be before DELETE)
+        if !result_columns.is_empty() {
+            // Get rowid for RETURNING
+            let rowid_reg = program.alloc_register();
+            program.emit_insn(Insn::RowId {
+                cursor_id: main_table_cursor_id,
+                dest: rowid_reg,
+            });
+
+            // Allocate registers for column values
+            let columns_start_reg = program.alloc_registers(table_reference.columns().len());
+
+            // Read all column values from the row to be deleted
+            for (i, _column) in table_reference.columns().iter().enumerate() {
+                program.emit_column(main_table_cursor_id, i, columns_start_reg + i);
+            }
+
+            // Emit RETURNING results using the values we just read
+            let value_registers = ReturningValueRegisters {
+                rowid_register: rowid_reg,
+                columns_start_register: columns_start_reg,
+                num_columns: table_reference.columns().len(),
+            };
+
+            emit_returning_results(program, result_columns, &value_registers)?;
         }
 
         program.emit_insn(Insn::Delete {
@@ -1021,7 +1055,7 @@ fn emit_update_insns(
                 start_reg: start,
                 count: table_ref.columns().len(),
                 check_generated: true,
-                table_reference: Rc::clone(&btree_table),
+                table_reference: Arc::clone(&btree_table),
             });
         }
 
@@ -1169,6 +1203,19 @@ fn emit_update_insns(
             },
             table_name: table_ref.identifier.clone(),
         });
+
+        // Emit RETURNING results if specified
+        if let Some(returning_columns) = &plan.returning {
+            if !returning_columns.is_empty() {
+                let value_registers = ReturningValueRegisters {
+                    rowid_register: rowid_set_clause_reg.unwrap_or(beg),
+                    columns_start_register: start,
+                    num_columns: table_ref.columns().len(),
+                };
+
+                emit_returning_results(program, returning_columns, &value_registers)?;
+            }
+        }
 
         // create full CDC record after update if necessary
         let cdc_after_reg = if program.capture_data_changes_mode().has_after() {

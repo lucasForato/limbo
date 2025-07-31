@@ -1,6 +1,7 @@
 use std::collections::HashSet;
 use std::ops::Range;
 use std::rc::Rc;
+use std::sync::Arc;
 
 use crate::ast;
 use crate::ext::VTabImpl;
@@ -772,7 +773,7 @@ pub fn translate_drop_table(
         //  cursor id 1
         let sqlite_schema_cursor_id_1 =
             program.alloc_cursor_id(CursorType::BTreeTable(schema_table.clone()));
-        let simple_table_rc = Rc::new(BTreeTable {
+        let simple_table_rc = Arc::new(BTreeTable {
             root_page: 0, // Not relevant for ephemeral table definition
             name: "ephemeral_scratch".to_string(),
             has_rowid: true,

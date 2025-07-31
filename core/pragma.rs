@@ -47,6 +47,10 @@ pub fn pragma_for(pragma: &PragmaName) -> Pragma {
             &["cache_size"],
         ),
         DatabaseList => Pragma::new(PragmaFlags::Result0, &["seq", "name", "file"]),
+        Encoding => Pragma::new(
+            PragmaFlags::Result0 | PragmaFlags::NoColumns1,
+            &["encoding"],
+        ),
         JournalMode => Pragma::new(
             PragmaFlags::NeedSchema | PragmaFlags::Result0 | PragmaFlags::SchemaReq,
             &["journal_mode"],

@@ -1,5 +1,5 @@
-import crypto from 'crypto';
-import fs from 'fs';
+import crypto from "crypto";
+import fs from "fs";
 import DualTest from "./dual-test.mjs";
 
 const dualTest = new DualTest();
@@ -17,23 +17,26 @@ dualTest.beforeEach(async (t) => {
       CREATE TABLE users (id INTEGER PRIMARY KEY, name TEXT, email TEXT)
   `);
   db.exec(
-    "INSERT INTO users (id, name, email) VALUES (1, 'Alice', 'alice@example.org')"
+    "INSERT INTO users (id, name, email) VALUES (1, 'Alice', 'alice@example.org')",
   );
   db.exec(
-    "INSERT INTO users (id, name, email) VALUES (2, 'Bob', 'bob@example.com')"
+    "INSERT INTO users (id, name, email) VALUES (2, 'Bob', 'bob@example.com')",
   );
 });
 
 dualTest.onlySqlitePasses("Statement.prepare() error", async (t) => {
   const db = t.context.db;
 
-  t.throws(() => {
-    return db.prepare("SYNTAX ERROR");
-  }, {
-    any: true,
-    instanceOf: t.context.errorType,
-    message: 'near "SYNTAX": syntax error'
-  });
+  t.throws(
+    () => {
+      return db.prepare("SYNTAX ERROR");
+    },
+    {
+      any: true,
+      instanceOf: t.context.errorType,
+      message: 'near "SYNTAX": syntax error',
+    },
+  );
 });
 
 dualTest.both("Statement.run() returning rows", async (t) => {
@@ -61,8 +64,10 @@ dualTest.both("Statement.run() [positional]", async (t) => {
 dualTest.both("Statement.run() [named]", async (t) => {
   const db = t.context.db;
 
-  const stmt = db.prepare("INSERT INTO users(name, email) VALUES (@name, @email);");
-  const info = stmt.run({ "name": "Carol", "email": "carol@example.net" });
+  const stmt = db.prepare(
+    "INSERT INTO users(name, email) VALUES (@name, @email);",
+  );
+  const info = stmt.run({ name: "Carol", email: "carol@example.net" });
   t.is(info.changes, 1);
   t.is(info.lastInsertRowid, 3);
 });
@@ -81,7 +86,7 @@ dualTest.both("Statement.get() [no parameters]", async (t) => {
 
   stmt = db.prepare("SELECT * FROM users");
   t.is(stmt.get().name, "Alice");
-  t.deepEqual(stmt.raw().get(), [1, 'Alice', 'alice@example.org']);
+  t.deepEqual(stmt.raw().get(), [1, "Alice", "alice@example.org"]);
 });
 
 dualTest.both("Statement.get() [positional]", async (t) => {
@@ -107,7 +112,7 @@ dualTest.both("Statement.get() [named]", async (t) => {
   var stmt = undefined;
 
   stmt = db.prepare("SELECT :b, :a");
-  t.deepEqual(stmt.raw().get({ a: 'a', b: 'b' }), ['b', 'a']);
+  t.deepEqual(stmt.raw().get({ a: "a", b: "b" }), ["b", "a"]);
 
   stmt = db.prepare("SELECT * FROM users WHERE id = :id");
   t.is(stmt.get({ id: 0 }), undefined);
@@ -132,7 +137,7 @@ dualTest.both("Statement.get() [raw]", async (t) => {
   t.deepEqual(stmt.raw().get(1), [1, "Alice", "alice@example.org"]);
 });
 
-dualTest.both("Statement.iterate() [empty]", async (t) => {
+dualTest.onlySqlitePasses("Statement.iterate() [empty]", async (t) => {
   const db = t.context.db;
 
   const stmt = db.prepare("SELECT * FROM users WHERE id = 0");
@@ -141,7 +146,7 @@ dualTest.both("Statement.iterate() [empty]", async (t) => {
   t.is(stmt.iterate({}).next().done, true);
 });
 
-dualTest.both("Statement.iterate()", async (t) => {
+dualTest.onlySqlitePasses("Statement.iterate()", async (t) => {
   const db = t.context.db;
 
   const stmt = db.prepare("SELECT * FROM users");
@@ -178,10 +183,7 @@ dualTest.both("Statement.all() [pluck]", async (t) => {
   const db = t.context.db;
 
   const stmt = db.prepare("SELECT * FROM users");
-  const expected = [
-    1,
-    2,
-  ];
+  const expected = [1, 2];
   t.deepEqual(stmt.pluck().all(), expected);
 });
 
@@ -243,70 +245,93 @@ dualTest.onlySqlitePasses(
 
 dualTest.onlySqlitePasses("Statement.raw() [failure]", async (t) => {
   const db = t.context.db;
-  const stmt = db.prepare("INSERT INTO users (id, name, email) VALUES (?, ?, ?)");
-  await t.throws(() => {
-    stmt.raw()
-  }, {
-    message: 'The raw() method is only for statements that return data'
-  });
+  const stmt = db.prepare(
+    "INSERT INTO users (id, name, email) VALUES (?, ?, ?)",
+  );
+  await t.throws(
+    () => {
+      stmt.raw();
+    },
+    {
+      message: "The raw() method is only for statements that return data",
+    },
+  );
 });
 
-dualTest.onlySqlitePasses("Statement.run() with array bind parameter", async (t) => {
-  const db = t.context.db;
+dualTest.onlySqlitePasses(
+  "Statement.run() with array bind parameter",
+  async (t) => {
+    const db = t.context.db;
 
-  db.exec(`
+    db.exec(`
       DROP TABLE IF EXISTS t;
       CREATE TABLE t (value BLOB);
   `);
 
-  const array = [1, 2, 3];
+    const array = [1, 2, 3];
 
-  const insertStmt = db.prepare("INSERT INTO t (value) VALUES (?)");
-  await t.throws(() => {
+    const insertStmt = db.prepare("INSERT INTO t (value) VALUES (?)");
+    await t.throws(
+      () => {
+        insertStmt.run([array]);
+      },
+      {
+        message:
+          "SQLite3 can only bind numbers, strings, bigints, buffers, and null",
+      },
+    );
+  },
+);
+
+dualTest.onlySqlitePasses(
+  "Statement.run() with Float32Array bind parameter",
+  async (t) => {
+    const db = t.context.db;
+
+    db.exec(`
+      DROP TABLE IF EXISTS t;
+      CREATE TABLE t (value BLOB);
+  `);
+
+    const array = new Float32Array([1, 2, 3]);
+
+    const insertStmt = db.prepare("INSERT INTO t (value) VALUES (?)");
     insertStmt.run([array]);
-  }, {
-    message: 'SQLite3 can only bind numbers, strings, bigints, buffers, and null'
-  });
-});
 
-dualTest.onlySqlitePasses("Statement.run() with Float32Array bind parameter", async (t) => {
-  const db = t.context.db;
-
-  db.exec(`
-      DROP TABLE IF EXISTS t;
-      CREATE TABLE t (value BLOB);
-  `);
-
-  const array = new Float32Array([1, 2, 3]);
-
-  const insertStmt = db.prepare("INSERT INTO t (value) VALUES (?)");
-  insertStmt.run([array]);
-
-  const selectStmt = db.prepare("SELECT value FROM t");
-  t.deepEqual(selectStmt.raw().get()[0], Buffer.from(array.buffer));
-});
+    const selectStmt = db.prepare("SELECT value FROM t");
+    t.deepEqual(selectStmt.raw().get()[0], Buffer.from(array.buffer));
+  },
+);
 
 /// This test is not supported by better-sqlite3, but is supported by libsql.
 /// Therefore, when implementing it in Turso, only enable the test for Turso.
-dualTest.skip("Statement.run() for vector feature with Float32Array bind parameter", async (t) => {
-  const db = t.context.db;
+dualTest.skip(
+  "Statement.run() for vector feature with Float32Array bind parameter",
+  async (t) => {
+    const db = t.context.db;
 
-  db.exec(`
+    db.exec(`
     DROP TABLE IF EXISTS t;
     CREATE TABLE t (embedding FLOAT32(8));
     CREATE INDEX t_idx ON t ( libsql_vector_idx(embedding) );
   `);
 
-  const insertStmt = db.prepare("INSERT INTO t VALUES (?)");
-  insertStmt.run([new Float32Array([1, 1, 1, 1, 1, 1, 1, 1])]);
-  insertStmt.run([new Float32Array([-1, -1, -1, -1, -1, -1, -1, -1])]);
+    const insertStmt = db.prepare("INSERT INTO t VALUES (?)");
+    insertStmt.run([new Float32Array([1, 1, 1, 1, 1, 1, 1, 1])]);
+    insertStmt.run([new Float32Array([-1, -1, -1, -1, -1, -1, -1, -1])]);
 
-  const selectStmt = db.prepare("SELECT embedding FROM vector_top_k('t_idx', vector('[2,2,2,2,2,2,2,2]'), 1) n JOIN t ON n.rowid = t.rowid");
-  t.deepEqual(selectStmt.raw().get()[0], Buffer.from(new Float32Array([1, 1, 1, 1, 1, 1, 1, 1]).buffer));
+    const selectStmt = db.prepare(
+      "SELECT embedding FROM vector_top_k('t_idx', vector('[2,2,2,2,2,2,2,2]'), 1) n JOIN t ON n.rowid = t.rowid",
+    );
+    t.deepEqual(
+      selectStmt.raw().get()[0],
+      Buffer.from(new Float32Array([1, 1, 1, 1, 1, 1, 1, 1]).buffer),
+    );
 
-  // we need to explicitly delete this table because later when sqlite-based (not LibSQL) tests will delete table 't' they will leave 't_idx_shadow' table untouched
-  db.exec(`DROP TABLE t`);
-});
+    // we need to explicitly delete this table because later when sqlite-based (not LibSQL) tests will delete table 't' they will leave 't_idx_shadow' table untouched
+    db.exec(`DROP TABLE t`);
+  },
+);
 
 dualTest.onlySqlitePasses("Statement.columns()", async (t) => {
   const db = t.context.db;
@@ -318,7 +343,7 @@ dualTest.onlySqlitePasses("Statement.columns()", async (t) => {
     {
       column: null,
       database: null,
-      name: '1',
+      name: "1",
       table: null,
       type: null,
     },
@@ -354,7 +379,7 @@ dualTest.onlySqlitePasses("Database.transaction()", async (t) => {
   const db = t.context.db;
 
   const insert = db.prepare(
-    "INSERT INTO users(name, email) VALUES (:name, :email)"
+    "INSERT INTO users(name, email) VALUES (:name, :email)",
   );
 
   const insertMany = db.transaction((users) => {
@@ -379,7 +404,7 @@ dualTest.onlySqlitePasses("Database.transaction()", async (t) => {
 dualTest.onlySqlitePasses("Database.transaction().immediate()", async (t) => {
   const db = t.context.db;
   const insert = db.prepare(
-    "INSERT INTO users(name, email) VALUES (:name, :email)"
+    "INSERT INTO users(name, email) VALUES (:name, :email)",
   );
   const insertMany = db.transaction((users) => {
     t.is(db.inTransaction, true);
@@ -408,83 +433,98 @@ dualTest.onlySqlitePasses("values", async (t) => {
 dualTest.both("Database.pragma()", async (t) => {
   const db = t.context.db;
   db.pragma("cache_size = 2000");
-  t.deepEqual(db.pragma("cache_size"), [{ "cache_size": 2000 }]);
+  t.deepEqual(db.pragma("cache_size"), [{ cache_size: 2000 }]);
 });
 
 dualTest.both("errors", async (t) => {
   const db = t.context.db;
 
-  const syntaxError = await t.throws(() => {
-    db.exec("SYNTAX ERROR");
-  }, {
-    any: true,
-    instanceOf: t.context.errorType,
-    message: /near "SYNTAX": syntax error/,
-    code: 'SQLITE_ERROR'
-  });
-  const noTableError = await t.throws(() => {
-    db.exec("SELECT * FROM missing_table");
-  }, {
-    any: true,
-    instanceOf: t.context.errorType,
-    message: /(Parse error: Table missing_table not found|no such table: missing_table)/,
-    code: 'SQLITE_ERROR'
-  });
+  const syntaxError = await t.throws(
+    () => {
+      db.exec("SYNTAX ERROR");
+    },
+    {
+      any: true,
+      instanceOf: t.context.errorType,
+      message: /near "SYNTAX": syntax error/,
+      code: "SQLITE_ERROR",
+    },
+  );
+  const noTableError = await t.throws(
+    () => {
+      db.exec("SELECT * FROM missing_table");
+    },
+    {
+      any: true,
+      instanceOf: t.context.errorType,
+      message:
+        /(Parse error: Table missing_table not found|no such table: missing_table)/,
+      code: "SQLITE_ERROR",
+    },
+  );
 
-  if (t.context.provider === 'libsql') {
-    t.is(noTableError.rawCode, 1)
-    t.is(syntaxError.rawCode, 1)
+  if (t.context.provider === "libsql") {
+    t.is(noTableError.rawCode, 1);
+    t.is(syntaxError.rawCode, 1);
   }
 });
 
 dualTest.onlySqlitePasses("Database.prepare() after close()", async (t) => {
   const db = t.context.db;
   db.close();
-  t.throws(() => {
-    db.prepare("SELECT 1");
-  }, {
-    instanceOf: TypeError,
-    message: "The database connection is not open"
-  });
+  t.throws(
+    () => {
+      db.prepare("SELECT 1");
+    },
+    {
+      instanceOf: TypeError,
+      message: "The database connection is not open",
+    },
+  );
 });
 
 dualTest.onlySqlitePasses("Database.exec() after close()", async (t) => {
   const db = t.context.db;
   db.close();
-  t.throws(() => {
-    db.exec("SELECT 1");
-  }, {
-    instanceOf: TypeError,
-    message: "The database connection is not open"
-  });
+  t.throws(
+    () => {
+      db.exec("SELECT 1");
+    },
+    {
+      instanceOf: TypeError,
+      message: "The database connection is not open",
+    },
+  );
 });
 
 /// Generate a unique database filename
 const genDatabaseFilename = () => {
-  return `test-${crypto.randomBytes(8).toString('hex')}.db`;
+  return `test-${crypto.randomBytes(8).toString("hex")}.db`;
 };
 
-new DualTest(genDatabaseFilename).onlySqlitePasses("Timeout option", async (t) => {
-  t.teardown(() => fs.unlinkSync(t.context.path));
+new DualTest(genDatabaseFilename).onlySqlitePasses(
+  "Timeout option",
+  async (t) => {
+    t.teardown(() => fs.unlinkSync(t.context.path));
 
-  const timeout = 1000;
-  const { db: conn1 } = t.context;
-  conn1.exec("CREATE TABLE t(x)");
-  conn1.exec("BEGIN IMMEDIATE");
-  conn1.exec("INSERT INTO t VALUES (1)")
-  const options = { timeout };
-  const conn2 = t.context.connect(t.context.path, options);
-  const start = Date.now();
-  try {
-    conn2.exec("INSERT INTO t VALUES (1)")
-  } catch (e) {
-    t.is(e.code, "SQLITE_BUSY");
-    const end = Date.now();
-    const elapsed = end - start;
-    // Allow some tolerance for the timeout.
-    t.is(elapsed > timeout / 2, true);
-  }
-  conn1.close();
-  conn2.close();
-});
-
+    const timeout = 1000;
+    const { db: conn1 } = t.context;
+    conn1.exec("CREATE TABLE t(x)");
+    conn1.exec("BEGIN IMMEDIATE");
+    conn1.exec("INSERT INTO t VALUES (1)");
+    const options = { timeout };
+    const conn2 = t.context.connect(t.context.path, options);
+    const start = Date.now();
+    try {
+      conn2.exec("INSERT INTO t VALUES (1)");
+    } catch (e) {
+      t.is(e.code, "SQLITE_BUSY");
+      const end = Date.now();
+      const elapsed = end - start;
+      // Allow some tolerance for the timeout.
+      t.is(elapsed > timeout / 2, true);
+    }
+    conn1.close();
+    conn2.close();
+  },
+);

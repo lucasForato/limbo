@@ -1,10 +1,16 @@
 import { 
   executeCursor, 
+  executePipeline,
   encodeValue, 
   decodeValue, 
   type CursorRequest,
   type CursorResponse,
-  type CursorEntry
+  type CursorEntry,
+  type PipelineRequest,
+  type SequenceRequest,
+  type CloseRequest,
+  type NamedArg,
+  type Value
 } from './protocol.js';
 import { DatabaseError } from './error.js';
 
@@ -46,10 +52,10 @@ export class Session {
    * Execute a SQL statement and return all results.
    * 
    * @param sql - The SQL statement to execute
-   * @param args - Optional array of parameter values
+   * @param args - Optional array of parameter values or object with named parameters
    * @returns Promise resolving to the complete result set
    */
-  async execute(sql: string, args: any[] = []): Promise<any> {
+  async execute(sql: string, args: any[] | Record<string, any> = []): Promise<any> {
     const { response, entries } = await this.executeRaw(sql, args);
     const result = await this.processCursorEntries(entries);
     return result;
@@ -59,17 +65,31 @@ export class Session {
    * Execute a SQL statement and return the raw response and entries.
    * 
    * @param sql - The SQL statement to execute
-   * @param args - Optional array of parameter values
+   * @param args - Optional array of parameter values or object with named parameters
    * @returns Promise resolving to the raw response and cursor entries
    */
-  async executeRaw(sql: string, args: any[] = []): Promise<{ response: CursorResponse; entries: AsyncGenerator<CursorEntry> }> {
+  async executeRaw(sql: string, args: any[] | Record<string, any> = []): Promise<{ response: CursorResponse; entries: AsyncGenerator<CursorEntry> }> {
+    let positionalArgs: Value[] = [];
+    let namedArgs: NamedArg[] = [];
+
+    if (Array.isArray(args)) {
+      positionalArgs = args.map(encodeValue);
+    } else {
+      // Convert object with named parameters to NamedArg array
+      namedArgs = Object.entries(args).map(([name, value]) => ({
+        name,
+        value: encodeValue(value)
+      }));
+    }
+
     const request: CursorRequest = {
       baton: this.baton,
       batch: {
         steps: [{
           stmt: {
             sql,
-            args: args.map(encodeValue),
+            args: positionalArgs,
+            named_args: namedArgs,
             want_rows: true
           }
         }]
@@ -177,6 +197,7 @@ export class Session {
           stmt: {
             sql,
             args: [],
+            named_args: [],
             want_rows: false
           }
         }))
@@ -213,5 +234,65 @@ export class Session {
       rowsAffected: totalRowsAffected,
       lastInsertRowid
     };
+  }
+
+  /**
+   * Execute a sequence of SQL statements separated by semicolons.
+   * 
+   * @param sql - SQL string containing multiple statements separated by semicolons
+   * @returns Promise resolving when all statements are executed
+   */
+  async sequence(sql: string): Promise<void> {
+    const request: PipelineRequest = {
+      baton: this.baton,
+      requests: [{
+        type: "sequence",
+        sql: sql
+      } as SequenceRequest]
+    };
+
+    const response = await executePipeline(this.baseUrl, this.config.authToken, request);
+    
+    this.baton = response.baton;
+    if (response.base_url) {
+      this.baseUrl = response.base_url;
+    }
+
+    // Check for errors in the response
+    if (response.results && response.results[0]) {
+      const result = response.results[0];
+      if (result.type === "error") {
+        throw new DatabaseError(result.error?.message || 'Sequence execution failed');
+      }
+    }
+  }
+
+  /**
+   * Close the session.
+   * 
+   * This sends a close request to the server to properly clean up the stream
+   * before resetting the local state.
+   */
+  async close(): Promise<void> {
+    // Only send close request if we have an active baton
+    if (this.baton) {
+      try {
+        const request: PipelineRequest = {
+          baton: this.baton,
+          requests: [{
+            type: "close"
+          } as CloseRequest]
+        };
+
+        await executePipeline(this.baseUrl, this.config.authToken, request);
+      } catch (error) {
+        // Ignore errors during close, as the connection might already be closed
+        console.error('Error closing session:', error);
+      }
+    }
+
+    // Reset local state
+    this.baton = null;
+    this.baseUrl = '';
   }
 }

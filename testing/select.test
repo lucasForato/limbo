@@ -47,6 +47,18 @@ do_execsql_test select-limit-0 {
   SELECT id FROM users LIMIT 0;
 } {}
 
+do_execsql_test select-doubly-qualified {
+  SELECT main.users.id FROM users LIMIT 0;
+} {}
+
+do_execsql_test_error select-doubly-qualified-wrong-table {
+  SELECT main.wrong.id FROM users LIMIT 0;
+} {.*}
+
+do_execsql_test_error select-doubly-qualified-wrong-column {
+  SELECT main.users.wrong FROM users LIMIT 0;
+} {.*}
+
 # ORDER BY id here because sqlite uses age_idx here and we (yet) don't so force it to evaluate in ID order
 do_execsql_test select-limit-true {
   SELECT id FROM users ORDER BY id LIMIT true;
@@ -571,6 +583,47 @@ if {[info exists ::env(SQLITE_EXEC)] && ($::env(SQLITE_EXEC) eq "scripts/limbo-s
 
       select * from t INTERSECT select * from u EXCEPT select * from v;
     } {}
+
+    do_execsql_test_on_specific_db {:memory:} select-values-union {
+    CREATE TABLE t (x TEXT, y TEXT);
+    INSERT INTO t VALUES('x','x'),('y','y');
+
+    values('x', 'x') UNION select * from t;
+    } {x|x
+    y|y}
+
+    do_execsql_test_on_specific_db {:memory:} select-values-union-2 {
+    CREATE TABLE t (x TEXT, y TEXT);
+    INSERT INTO t VALUES('x','x'),('y','y');
+
+    values('x', 'x'), ('y', 'y') UNION select * from t;
+    } {x|x
+    y|y}
+
+    do_execsql_test_on_specific_db {:memory:} select-values-except {
+      CREATE TABLE t (x TEXT, y TEXT);
+      INSERT INTO t VALUES('x','x'),('y','y');
+
+      select * from t EXCEPT values('x','x'),('z','y');
+    } {y|y}
+
+    do_execsql_test_on_specific_db {:memory:} select-values-union-all-limit {
+    CREATE TABLE t (x TEXT);
+    INSERT INTO t VALUES('x'), ('y'), ('z');
+
+    values('x') UNION ALL select * from t limit 3;
+    } {x
+    x
+    y}
+
+    do_execsql_test_on_specific_db {:memory:} select-values-union-all-limit-2 {
+    CREATE TABLE t (x TEXT);
+    INSERT INTO t VALUES('x'), ('y'), ('z');
+
+    values('a'), ('b') UNION ALL select * from t limit 3;
+    } {a
+    b
+    x}
 }
 
 do_execsql_test_on_specific_db {:memory:} select-no-match-in-leaf-page {

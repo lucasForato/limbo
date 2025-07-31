@@ -7,7 +7,7 @@ mod tests {
 
     use rand::{Rng, SeedableRng};
     use rand_chacha::ChaCha8Rng;
-    use rusqlite::params;
+    use rusqlite::{params, types::Value};
 
     use crate::{
         common::{limbo_exec_rows, rng_from_time, sqlite_exec_rows, TempDatabase},
@@ -569,14 +569,28 @@ mod tests {
                 .map(|c| c.to_string())
                 .collect::<Vec<_>>();
 
-            for _ in 0..num_selects_in_union {
-                // Randomly pick a table
-                let table_to_select_from = &table_names[rng.random_range(0..table_names.len())];
-                select_statements.push(format!(
-                    "SELECT {} FROM {}",
-                    cols_to_select.join(", "),
-                    table_to_select_from
-                ));
+            let mut has_right_most_values = false;
+            for i in 0..num_selects_in_union {
+                let p = 1.0 / table_names.len() as f64;
+                // Randomly decide whether to use a VALUES clause or a SELECT clause
+                if rng.random_bool(p) {
+                    let values = (0..cols_to_select.len())
+                        .map(|_| rng.random_range(-3..3))
+                        .map(|val| val.to_string())
+                        .collect::<Vec<_>>();
+                    select_statements.push(format!("VALUES({})", values.join(", ")));
+                    if i == (num_selects_in_union - 1) {
+                        has_right_most_values = true;
+                    }
+                } else {
+                    // Randomly pick a table
+                    let table_to_select_from = &table_names[rng.random_range(0..table_names.len())];
+                    select_statements.push(format!(
+                        "SELECT {} FROM {}",
+                        cols_to_select.join(", "),
+                        table_to_select_from
+                    ));
+                }
             }
 
             const COMPOUND_OPERATORS: [&str; 4] =
@@ -590,7 +604,8 @@ mod tests {
                 query.push_str(select_statement);
             }
 
-            if rng.random_bool(0.8) {
+            // if the right most SELECT is a VALUES clause, no limit is not allowed
+            if rng.random_bool(0.8) && !has_right_most_values {
                 let limit_val = rng.random_range(0..=MAX_LIMIT_VALUE); // LIMIT 0 is valid
                 query = format!("{query} LIMIT {limit_val}");
             }
@@ -1417,6 +1432,51 @@ mod tests {
             }
         }
     }
+    #[test]
+    // Simple fuzz test for SUM with floats
+    pub fn sum_agg_fuzz_floats() {
+        let _ = env_logger::try_init();
+
+        let (mut rng, seed) = rng_from_time();
+        log::info!("seed: {seed}");
+
+        for _ in 0..100 {
+            let db = TempDatabase::new_empty(false);
+            let limbo_conn = db.connect_limbo();
+            let sqlite_conn = rusqlite::Connection::open_in_memory().unwrap();
+
+            limbo_exec_rows(&db, &limbo_conn, "CREATE TABLE t(x)");
+            sqlite_exec_rows(&sqlite_conn, "CREATE TABLE t(x)");
+
+            // Insert 50-100 mixed values: floats, text, NULL
+            let mut values = Vec::new();
+            for _ in 0..rng.random_range(50..=100) {
+                let value = rng.random_range(-100.0..100.0).to_string();
+                values.push(format!("({value})"));
+            }
+
+            let insert = format!("INSERT INTO t VALUES {}", values.join(","));
+            limbo_exec_rows(&db, &limbo_conn, &insert);
+            sqlite_exec_rows(&sqlite_conn, &insert);
+
+            let query = "SELECT sum(x) FROM t ORDER BY x";
+            let limbo_result = limbo_exec_rows(&db, &limbo_conn, query);
+            let sqlite_result = sqlite_exec_rows(&sqlite_conn, query);
+
+            let limbo_val = match limbo_result.first().and_then(|row| row.first()) {
+                Some(Value::Real(f)) => *f,
+                Some(Value::Null) | None => 0.0,
+                _ => panic!("Unexpected type in limbo result: {limbo_result:?}"),
+            };
+
+            let sqlite_val = match sqlite_result.first().and_then(|row| row.first()) {
+                Some(Value::Real(f)) => *f,
+                Some(Value::Null) | None => 0.0,
+                _ => panic!("Unexpected type in limbo result: {limbo_result:?}"),
+            };
+            assert_eq!(limbo_val, sqlite_val, "seed: {seed}, values: {values:?}");
+        }
+    }
 
     #[test]
     // Simple fuzz test for SUM with mixed numeric/non-numeric values (issue #2133)
@@ -1460,6 +1520,51 @@ mod tests {
             let sqlite = sqlite_exec_rows(&sqlite_conn, query);
 
             assert_eq!(limbo, sqlite, "seed: {seed}, values: {values:?}");
+        }
+    }
+
+    #[test]
+    fn concat_ws_fuzz() {
+        let _ = env_logger::try_init();
+
+        let (mut rng, seed) = rng_from_time();
+        log::info!("seed: {seed}");
+
+        for _ in 0..100 {
+            let db = TempDatabase::new_empty(false);
+            let limbo_conn = db.connect_limbo();
+            let sqlite_conn = rusqlite::Connection::open_in_memory().unwrap();
+
+            let num_args = rng.random_range(7..=17);
+            let mut args = Vec::new();
+            for _ in 0..num_args {
+                let arg = match rng.random_range(0..3) {
+                    0 => rng.random_range(-100..100).to_string(),
+                    1 => format!(
+                        "'{}'",
+                        (0..rng.random_range(1..=5))
+                            .map(|_| rng.random_range(b'a'..=b'z') as char)
+                            .collect::<String>()
+                    ),
+                    2 => "NULL".to_string(),
+                    _ => unreachable!(),
+                };
+                args.push(arg);
+            }
+
+            let sep = match rng.random_range(0..=2) {
+                0 => "','",
+                1 => "'-'",
+                2 => "NULL",
+                _ => unreachable!(),
+            };
+
+            let query = format!("SELECT concat_ws({}, {})", sep, args.join(", "));
+
+            let limbo = limbo_exec_rows(&db, &limbo_conn, &query);
+            let sqlite = sqlite_exec_rows(&sqlite_conn, &query);
+
+            assert_eq!(limbo, sqlite, "seed: {seed}, sep: {sep}, args: {args:?}");
         }
     }
 

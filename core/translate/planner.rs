@@ -109,6 +109,7 @@ pub fn bind_column_references(
     top_level_expr: &mut Expr,
     referenced_tables: &mut TableReferences,
     result_columns: Option<&[ResultSetColumn]>,
+    connection: &Arc<crate::Connection>,
 ) -> Result<()> {
     walk_expr_mut(top_level_expr, &mut |expr: &mut Expr| -> Result<()> {
         match expr {
@@ -211,7 +212,7 @@ pub fn bind_column_references(
                     Ok(())
                 } else {
                     // Unquoted identifiers must resolve to columns - no fallback
-                    crate::bail_parse_error!("Column {} not found", id.as_str())
+                    crate::bail_parse_error!("no such column: {}", id.as_str())
                 }
             }
             Expr::Qualified(tbl, id) => {
@@ -235,7 +236,7 @@ pub fn bind_column_references(
                         .is_some_and(|name| name.eq_ignore_ascii_case(&normalized_id))
                 });
                 let Some(col_idx) = col_idx else {
-                    crate::bail_parse_error!("Column {} not found", normalized_id);
+                    crate::bail_parse_error!("no such column: {}", normalized_id);
                 };
                 let col = tbl.columns().get(col_idx).unwrap();
                 *expr = Expr::Column {
@@ -245,6 +246,75 @@ pub fn bind_column_references(
                     is_rowid_alias: col.is_rowid_alias,
                 };
                 referenced_tables.mark_column_used(tbl_id, col_idx);
+                Ok(())
+            }
+            Expr::DoublyQualified(db_name, tbl_name, col_name) => {
+                let normalized_col_name = normalize_ident(col_name.as_str());
+
+                // Create a QualifiedName and use existing resolve_database_id method
+                let qualified_name = ast::QualifiedName {
+                    db_name: Some(db_name.clone()),
+                    name: tbl_name.clone(),
+                    alias: None,
+                };
+                let database_id = connection.resolve_database_id(&qualified_name)?;
+
+                // Get the table from the specified database
+                let table = connection
+                    .with_schema(database_id, |schema| schema.get_table(tbl_name.as_str()))
+                    .ok_or_else(|| {
+                        crate::LimboError::ParseError(format!(
+                            "no such table: {}.{}",
+                            db_name.as_str(),
+                            tbl_name.as_str()
+                        ))
+                    })?;
+
+                // Find the column in the table
+                let col_idx = table
+                    .columns()
+                    .iter()
+                    .position(|c| {
+                        c.name
+                            .as_ref()
+                            .is_some_and(|name| name.eq_ignore_ascii_case(&normalized_col_name))
+                    })
+                    .ok_or_else(|| {
+                        crate::LimboError::ParseError(format!(
+                            "Column: {}.{}.{} not found",
+                            db_name.as_str(),
+                            tbl_name.as_str(),
+                            col_name.as_str()
+                        ))
+                    })?;
+
+                let col = table.columns().get(col_idx).unwrap();
+
+                // Check if this is a rowid alias
+                let is_rowid_alias = col.is_rowid_alias;
+
+                // Convert to Column expression - since this is a cross-database reference,
+                // we need to create a synthetic table reference for it
+                // For now, we'll error if the table isn't already in the referenced tables
+                let normalized_tbl_name = normalize_ident(tbl_name.as_str());
+                let matching_tbl = referenced_tables
+                    .find_table_and_internal_id_by_identifier(&normalized_tbl_name);
+
+                if let Some((tbl_id, _)) = matching_tbl {
+                    // Table is already in referenced tables, use existing internal ID
+                    *expr = Expr::Column {
+                        database: Some(database_id),
+                        table: tbl_id,
+                        column: col_idx,
+                        is_rowid_alias,
+                    };
+                    referenced_tables.mark_column_used(tbl_id, col_idx);
+                } else {
+                    return Err(crate::LimboError::ParseError(format!(
+                        "table {normalized_tbl_name} is not in FROM clause - cross-database column references require the table to be explicitly joined"
+                    )));
+                }
+
                 Ok(())
             }
             _ => Ok(()),
@@ -605,12 +675,13 @@ pub fn parse_where(
     table_references: &mut TableReferences,
     result_columns: Option<&[ResultSetColumn]>,
     out_where_clause: &mut Vec<WhereTerm>,
+    connection: &Arc<crate::Connection>,
 ) -> Result<()> {
     if let Some(where_expr) = where_clause {
         let mut predicates = vec![];
         break_predicate_at_and_boundaries(where_expr, &mut predicates);
         for expr in predicates.iter_mut() {
-            bind_column_references(expr, table_references, result_columns)?;
+            bind_column_references(expr, table_references, result_columns, connection)?;
         }
         for expr in predicates {
             out_where_clause.push(WhereTerm {
@@ -893,7 +964,7 @@ fn parse_join(
                 let mut preds = vec![];
                 break_predicate_at_and_boundaries(expr, &mut preds);
                 for predicate in preds.iter_mut() {
-                    bind_column_references(predicate, table_references, None)?;
+                    bind_column_references(predicate, table_references, None, connection)?;
                 }
                 for pred in preds {
                     out_where_clause.push(WhereTerm {

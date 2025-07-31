@@ -1,6 +1,6 @@
-# Limbo Database Manual
+# Turso Database Manual
 
-Welcome to Limbo database manual!
+Welcome to Turso database manual!
 
 ## Table of contents
 
@@ -21,11 +21,12 @@ Welcome to Limbo database manual!
   * [`ROLLBACK TRANSACTION` — abort the current transaction](#rollback-transaction--abort-the-current-transaction)
   * [`SELECT` — retrieve rows from a table](#select--retrieve-rows-from-a-table)
   * [`UPDATE` — update rows of a table](#update--update-rows-of-a-table)
+* [JavaScript API](#javascript-api)
 * [SQLite C API](#sqlite-c-api)
   * [WAL manipulation](#wal-manipulation)
     * [`libsql_wal_frame_count`](#libsql_wal_frame_count)
 * [SQL Commands](#sql-commands)
-* [Appendix A: Limbo Internals](#appendix-a-limbo-internals)
+* [Appendix A: Turso Internals](#appendix-a-turso-internals)
   * [Frontend](#frontend)
     * [Parser](#parser)
     * [Code generator](#code-generator)
@@ -36,7 +37,7 @@ Welcome to Limbo database manual!
 
 ## Introduction
 
-Limbo is an in-process relational database engine, aiming towards full compatibility with SQLite.
+Turso is an in-process relational database engine, aiming towards full compatibility with SQLite.
 
 Unlike client-server database systems such as PostgreSQL or MySQL, which require applications to communicate over network protocols for SQL execution,
 an in-process database is in your application memory space.
@@ -44,28 +45,28 @@ This embedded architecture eliminates network communication overhead, allowing f
 
 ### Getting Started
 
-You can install Limbo on your computer as follows:
+You can install Turso on your computer as follows:
 
 ```
 curl --proto '=https' --tlsv1.2 -LsSf \
-  https://github.com/tursodatabase/turso/releases/latest/download/limbo-installer.sh | sh
+  https://github.com/tursodatabase/turso/releases/latest/download/turso_cli-installer.sh | sh
 ```
 
 When you have the software installed, you can start a SQL shell as follows:
 
 ```console
-$ limbo
-Limbo
+$ turso
+Turso
 Enter ".help" for usage hints.
 Connected to a transient in-memory database.
 Use ".open FILENAME" to reopen on a persistent database
-limbo> SELECT 'hello, world';
+turso> SELECT 'hello, world';
 hello, world
 ```
 
 ## Limitations
 
-Limbo aims towards full SQLite compatibility but has the following limitations:
+Turso aims towards full SQLite compatibility but has the following limitations:
 
 * No multi-process access
 * No multi-threading
@@ -74,6 +75,7 @@ Limbo aims towards full SQLite compatibility but has the following limitations:
 * No triggers
 * No views
 * No vacuum
+* UTF-8 is the only supported character encoding
 
 For more detailed list of SQLite compatibility, please refer to [COMPAT.md](../COMPAT.md).
 
@@ -94,14 +96,14 @@ ALTER TABLE table_name DROP COLUMN column_name
 **Example:**
 
 ```console
-limbo> CREATE TABLE t(x);
-limbo> .schema t;
+turso> CREATE TABLE t(x);
+turso> .schema t;
 CREATE TABLE t (x);
-limbo> ALTER TABLE t ADD COLUMN y TEXT;
-limbo> .schema t
+turso> ALTER TABLE t ADD COLUMN y TEXT;
+turso> .schema t
 CREATE TABLE t ( x , y TEXT );
-limbo> ALTER TABLE t DROP COLUMN y;
-limbo> .schema t
+turso> ALTER TABLE t DROP COLUMN y;
+turso> .schema t
 CREATE TABLE t ( x  );
 ```
 
@@ -138,7 +140,7 @@ COMMIT [ TRANSACTION ]
 ### `CREATE INDEX` — define a new index
 
 > [!NOTE]  
-> Indexes are currently experimental in Limbo and not enabled by default.
+> Indexes are currently experimental in Turso and not enabled by default.
 
 **Synopsis:**
 
@@ -149,8 +151,8 @@ CREATE INDEX [ index_name ] ON table_name ( column_name )
 **Example:**
 
 ```
-limbo> CREATE TABLE t(x);
-limbo> CREATE INDEX t_idx ON t(x);
+turso> CREATE TABLE t(x);
+turso> CREATE INDEX t_idx ON t(x);
 ```
 
 ### `CREATE TABLE` — define a new table
@@ -164,9 +166,9 @@ CREATE TABLE table_name ( column_name [ column_type ], ... )
 **Example:**
 
 ```console
-limbo> DROP TABLE t;
-limbo> CREATE TABLE t(x);
-limbo> .schema t
+turso> DROP TABLE t;
+turso> CREATE TABLE t(x);
+turso> .schema t
 CREATE TABLE t (x);
 ```
 
@@ -181,18 +183,18 @@ DELETE FROM table_name [ WHERE expression ]
 **Example:**
 
 ```console
-limbo> DELETE FROM t WHERE x > 1;
+turso> DELETE FROM t WHERE x > 1;
 ```
 
 ### `DROP INDEX` - remove an index
 
 > [!NOTE]  
-> Indexes are currently experimental in Limbo and not enabled by default.
+> Indexes are currently experimental in Turso and not enabled by default.
 
 **Example:**
 
 ```console
-limbo> DROP INDEX idx;
+turso> DROP INDEX idx;
 ```
 
 ### `DROP TABLE` — remove a table
@@ -200,7 +202,7 @@ limbo> DROP INDEX idx;
 **Example:**
 
 ```console
-limbo> DROP TABLE t;
+turso> DROP TABLE t;
 ```
 
 ### `END TRANSACTION` — commit the current transaction
@@ -224,8 +226,8 @@ INSERT INTO table_name [ ( column_name, ... ) ] VALUES ( value, ... ) [, ( value
 **Example:**
 
 ```
-limbo> INSERT INTO t VALUES (1), (2), (3);
-limbo> SELECT * FROM t;
+turso> INSERT INTO t VALUES (1), (2), (3);
+turso> SELECT * FROM t;
 ┌───┐
 │ x │
 ├───┤
@@ -257,15 +259,15 @@ SELECT expression
 **Example:**
 
 ```console
-limbo> SELECT 1;
+turso> SELECT 1;
 ┌───┐
 │ 1 │
 ├───┤
 │ 1 │
 └───┘
-limbo> CREATE TABLE t(x);
-limbo> INSERT INTO t VALUES (1), (2), (3);
-limbo> SELECT * FROM t WHERE x >= 2;
+turso> CREATE TABLE t(x);
+turso> INSERT INTO t VALUES (1), (2), (3);
+turso> SELECT * FROM t WHERE x >= 2;
 ┌───┐
 │ x │
 ├───┤
@@ -286,9 +288,9 @@ UPDATE table_name SET column_name = value [WHERE expression]
 **Example:**
 
 ```console
-limbo> CREATE TABLE t(x);
-limbo> INSERT INTO t VALUES (1), (2), (3);
-limbo> SELECT * FROM t;
+turso> CREATE TABLE t(x);
+turso> INSERT INTO t VALUES (1), (2), (3);
+turso> SELECT * FROM t;
 ┌───┐
 │ x │
 ├───┤
@@ -298,8 +300,8 @@ limbo> SELECT * FROM t;
 ├───┤
 │ 3 │
 └───┘
-limbo> UPDATE t SET x = 4 WHERE x >= 2;
-limbo> SELECT * FROM t;
+turso> UPDATE t SET x = 4 WHERE x >= 2;
+turso> SELECT * FROM t;
 ┌───┐
 │ x │
 ├───┤
@@ -311,9 +313,40 @@ limbo> SELECT * FROM t;
 └───┘
 ```
 
+## JavaScript API
+
+Turso supports a JavaScript API, both with native and WebAssembly package options.
+
+### Installation
+
+Installing the native package:
+
+```console
+npm i @tursodatabase/turso
+```
+
+Installing the WebAssembly package:
+
+```console
+npm i @tursodatabase/turso --cpu wasm32
+```
+
+### Getting Started
+
+To use Turso from JavaScript application, you need to import `Database` type from the `@tursodatabase/turso` package.
+You can the prepare a statement with `Database.prepare` method and execute the SQL statement with `Statement.get()` method.
+
+```
+import Database from '@tursodatabase/turso';
+
+const db = new Database('turso.db');
+const row = db.prepare('SELECT 1').get();
+console.log(row);
+```
+
 ## SQLite C API
 
-Limbo supports the SQLite C API, with libSQL extensions.
+Turso supports the SQLite C API, with libSQL extensions.
 
 ### WAL manipulation
 
@@ -348,28 +381,28 @@ in the `p_frame_count` parameter.
 
 ## SQL Commands
 
-## Appendix A: Limbo Internals
+## Appendix A: Turso Internals
 
-Limbo's architecture resembles SQLite's but differs primarily in its
+Turso's architecture resembles SQLite's but differs primarily in its
 asynchronous I/O model. This asynchronous design enables applications to
 leverage modern I/O interfaces like `io_uring,` maximizing storage device
 performance. While an in-process database offers significant performance
 advantages, integration with cloud services remains crucial for operations
-like backups. Limbo's asynchronous I/O model facilitates this by supporting
+like backups. Turso's asynchronous I/O model facilitates this by supporting
 networked storage capabilities.
 
-The high-level interface to Limbo is the same as in SQLite:
+The high-level interface to Turso is the same as in SQLite:
 
 * SQLite query language
 * The `sqlite3_prepare()` function for translating SQL statements to programs
   ("prepared statements")
 * The `sqlite3_step()` function for executing programs
 
-If we start with the SQLite query language, you can use the `limbo`
+If we start with the SQLite query language, you can use the `turso`
 command, for example, to evaluate SQL statements in the shell:
 
 ```
-limbo> SELECT 'hello, world';
+turso> SELECT 'hello, world';
 hello, world
 ```
 
@@ -378,7 +411,7 @@ interface to parse the statement and generate a bytecode program, a step
 called preparing a statement. When a statement is prepared, it can be executed
 using the `sqlite3_step()` function.
 
-To illustrate the different components of Limbo, we can look at the sequence
+To illustrate the different components of Turso, we can look at the sequence
 diagram of a query from the CLI to the bytecode virtual machine (VDBE):
 
 ```mermaid
@@ -422,7 +455,7 @@ statement using the `EXPLAIN` command in the shell. For our example SQL
 statement, the bytecode looks as follows:
 
 ```
-limbo> EXPLAIN SELECT 'hello, world';
+turso> EXPLAIN SELECT 'hello, world';
 addr  opcode             p1    p2    p3    p4             p5  comment
 ----  -----------------  ----  ----  ----  -------------  --  -------
 0     Init               0     4     0                    0   Start at 4

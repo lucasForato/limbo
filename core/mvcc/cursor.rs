@@ -1,210 +1,103 @@
 use crate::mvcc::clock::LogicalClock;
 use crate::mvcc::database::{MvStore, Result, Row, RowID};
-use crate::turso_assert;
 use std::fmt::Debug;
 use std::rc::Rc;
 
+#[derive(Debug, Copy, Clone)]
+enum CursorPosition {
+    /// We haven't loaded any row yet.
+    BeforeFirst,
+    /// We have loaded a row.
+    Loaded(RowID),
+    /// We have reached the end of the table.
+    End,
+}
 #[derive(Debug)]
-pub struct ScanCursor<Clock: LogicalClock> {
+pub struct MvccLazyCursor<Clock: LogicalClock> {
     pub db: Rc<MvStore<Clock>>,
-    pub row_ids: Vec<RowID>,
-    pub index: usize,
+    current_pos: CursorPosition,
+    table_id: u64,
     tx_id: u64,
 }
 
-impl<Clock: LogicalClock> ScanCursor<Clock> {
-    pub fn new(db: Rc<MvStore<Clock>>, tx_id: u64, table_id: u64) -> Result<ScanCursor<Clock>> {
-        let row_ids = db.scan_row_ids_for_table(table_id)?;
+impl<Clock: LogicalClock> MvccLazyCursor<Clock> {
+    pub fn new(db: Rc<MvStore<Clock>>, tx_id: u64, table_id: u64) -> Result<MvccLazyCursor<Clock>> {
         Ok(Self {
             db,
             tx_id,
-            row_ids,
-            index: 0,
+            current_pos: CursorPosition::BeforeFirst,
+            table_id,
         })
+    }
+
+    /// Insert a row into the table.
+    /// Sets the cursor to the inserted row.
+    pub fn insert(&mut self, row: Row) -> Result<()> {
+        self.current_pos = CursorPosition::Loaded(row.id);
+        self.db.insert(self.tx_id, row).inspect_err(|_| {
+            self.current_pos = CursorPosition::BeforeFirst;
+        })?;
+        Ok(())
+    }
+
+    pub fn current_row_id(&self) -> Option<RowID> {
+        match self.current_pos {
+            CursorPosition::Loaded(id) => Some(id),
+            CursorPosition::BeforeFirst => None,
+            CursorPosition::End => None,
+        }
+    }
+
+    pub fn current_row(&self) -> Result<Option<Row>> {
+        match self.current_pos {
+            CursorPosition::Loaded(id) => self.db.read(self.tx_id, id),
+            CursorPosition::BeforeFirst => Ok(None),
+            CursorPosition::End => Ok(None),
+        }
+    }
+
+    pub fn close(self) -> Result<()> {
+        Ok(())
+    }
+
+    /// Move the cursor to the next row. Returns true if the cursor moved to the next row, false if the cursor is at the end of the table.
+    pub fn forward(&mut self) -> bool {
+        let before_first = matches!(self.current_pos, CursorPosition::BeforeFirst);
+        let min_id = match self.current_pos {
+            CursorPosition::Loaded(id) => id.row_id + 1,
+            CursorPosition::BeforeFirst => i64::MIN, // we need to find first row, so we look from the first id
+            CursorPosition::End => {
+                // let's keep same state, we reached the end so no point in moving forward.
+                return false;
+            }
+        };
+        self.current_pos = match self.db.get_next_row_id_for_table(self.table_id, min_id) {
+            Some(id) => CursorPosition::Loaded(id),
+            None => {
+                if before_first {
+                    // if it wasn't loaded and we didn't find anything, it means the table is empty.
+                    CursorPosition::BeforeFirst
+                } else {
+                    // if we had something loaded, and we didn't find next key then it means we are at the end.
+                    CursorPosition::End
+                }
+            }
+        };
+        matches!(self.current_pos, CursorPosition::Loaded(_))
+    }
+
+    /// Returns true if the is not pointing to any row.
+    pub fn is_empty(&self) -> bool {
+        // If we reached the end of the table, it means we traversed the whole table therefore there must be something in the table.
+        // If we have loaded a row, it means there is something in the table.
+        match self.current_pos {
+            CursorPosition::Loaded(_) => false,
+            CursorPosition::BeforeFirst => true,
+            CursorPosition::End => true,
+        }
     }
 
     pub fn rewind(&mut self) {
-        self.index = 0;
-    }
-
-    pub fn insert(&self, row: Row) -> Result<()> {
-        self.db.insert(self.tx_id, row)
-    }
-
-    pub fn current_row_id(&self) -> Option<RowID> {
-        turso_assert!(self.index > 0, "index must be greater than zero");
-        let idx = self.index - 1;
-        if idx >= self.row_ids.len() {
-            return None;
-        }
-        Some(self.row_ids[idx])
-    }
-
-    pub fn current_row(&self) -> Result<Option<Row>> {
-        turso_assert!(self.index > 0, "index must be greater than zero");
-        let idx = self.index - 1;
-        if idx >= self.row_ids.len() {
-            return Ok(None);
-        }
-        let id = self.row_ids[idx];
-        self.db.read(self.tx_id, id)
-    }
-
-    pub fn close(self) -> Result<()> {
-        Ok(())
-    }
-
-    pub fn forward(&mut self) -> bool {
-        self.index += 1;
-        let idx = self.index - 1;
-        idx < self.row_ids.len()
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.index >= self.row_ids.len()
-    }
-}
-
-#[derive(Debug)]
-pub struct LazyScanCursor<Clock: LogicalClock> {
-    pub db: Rc<MvStore<Clock>>,
-    pub current_pos: Option<RowID>,
-    pub prev_pos: Option<RowID>,
-    table_id: u64,
-    tx_id: u64,
-}
-
-impl<Clock: LogicalClock> LazyScanCursor<Clock> {
-    pub fn new(db: Rc<MvStore<Clock>>, tx_id: u64, table_id: u64) -> Result<LazyScanCursor<Clock>> {
-        let current_pos = db.get_next_row_id_for_table(table_id, 0);
-        Ok(Self {
-            db,
-            tx_id,
-            current_pos,
-            prev_pos: None,
-            table_id,
-        })
-    }
-
-    pub fn insert(&self, row: Row) -> Result<()> {
-        self.db.insert(self.tx_id, row)
-    }
-
-    pub fn current_row_id(&self) -> Option<RowID> {
-        self.current_pos
-    }
-
-    pub fn current_row(&self) -> Result<Option<Row>> {
-        if let Some(id) = self.current_pos {
-            self.db.read(self.tx_id, id)
-        } else {
-            Ok(None)
-        }
-    }
-
-    pub fn close(self) -> Result<()> {
-        Ok(())
-    }
-
-    pub fn forward(&mut self) -> bool {
-        self.prev_pos = self.current_pos;
-        if let Some(row_id) = self.prev_pos {
-            let next_id = row_id.row_id + 1;
-            self.current_pos = self.db.get_next_row_id_for_table(self.table_id, next_id);
-            println!("{:?}", self.current_pos);
-            self.current_pos.is_some()
-        } else {
-            false
-        }
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.current_pos.is_none()
-    }
-}
-
-#[derive(Debug)]
-pub struct BucketScanCursor<Clock: LogicalClock> {
-    pub db: Rc<MvStore<Clock>>,
-    pub bucket: Vec<RowID>,
-    bucket_size: u64,
-    table_id: u64,
-    tx_id: u64,
-    index: usize,
-}
-
-impl<Clock: LogicalClock> BucketScanCursor<Clock> {
-    pub fn new(
-        db: Rc<MvStore<Clock>>,
-        tx_id: u64,
-        table_id: u64,
-        size: u64,
-    ) -> Result<BucketScanCursor<Clock>> {
-        let mut bucket = Vec::with_capacity(size as usize);
-        db.get_row_id_range(table_id, 0, &mut bucket, size)?;
-        Ok(Self {
-            db,
-            tx_id,
-            bucket,
-            bucket_size: size,
-            table_id,
-            index: 0,
-        })
-    }
-
-    pub fn insert(&self, row: Row) -> Result<()> {
-        self.db.insert(self.tx_id, row)
-    }
-
-    pub fn current_row_id(&self) -> Option<RowID> {
-        if self.index >= self.bucket.len() {
-            return None;
-        }
-        Some(self.bucket[self.index])
-    }
-
-    pub fn current_row(&self) -> Result<Option<Row>> {
-        if self.index >= self.bucket.len() {
-            return Ok(None);
-        }
-        let id = self.bucket[self.index];
-        self.db.read(self.tx_id, id)
-    }
-
-    pub fn close(self) -> Result<()> {
-        Ok(())
-    }
-
-    pub fn forward(&mut self) -> bool {
-        self.index += 1;
-        if self.index < self.bucket.len() {
-            true
-        } else {
-            self.next_bucket().unwrap_or_default()
-        }
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.index >= self.bucket.len()
-    }
-
-    fn next_bucket(&mut self) -> Result<bool> {
-        let last_id = if !self.bucket.is_empty() {
-            Some(self.bucket[self.bucket.len() - 1].row_id + 1)
-        } else {
-            None
-        };
-
-        self.bucket.clear();
-
-        if let Some(next_id) = last_id {
-            self.db
-                .get_row_id_range(self.table_id, next_id, &mut self.bucket, self.bucket_size)?;
-
-            self.index = 0;
-            Ok(!self.bucket.is_empty())
-        } else {
-            Ok(false)
-        }
+        self.current_pos = CursorPosition::BeforeFirst;
     }
 }

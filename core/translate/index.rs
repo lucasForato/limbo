@@ -252,9 +252,10 @@ fn resolve_sorted_columns<'a>(
         let ident = normalize_ident(match &sc.expr {
             // SQLite supports indexes on arbitrary expressions, but we don't (yet).
             // See "How to use indexes on expressions" in https://www.sqlite.org/expridx.html
-            Expr::Name(ast::Name::Ident(col_name)) | Expr::Name(ast::Name::Quoted(col_name)) => {
-                col_name
-            }
+            Expr::Id(ast::Name::Ident(col_name))
+            | Expr::Id(ast::Name::Quoted(col_name))
+            | Expr::Name(ast::Name::Ident(col_name))
+            | Expr::Name(ast::Name::Quoted(col_name)) => col_name,
             _ => crate::bail_parse_error!("Error: cannot use expressions in CREATE INDEX"),
         });
         let Some(col) = table.get_column(&ident) else {

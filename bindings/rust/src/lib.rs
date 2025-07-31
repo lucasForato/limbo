@@ -37,11 +37,12 @@ pub mod transaction;
 pub mod value;
 
 use transaction::TransactionBehavior;
+use turso_core::types::WalInsertInfo;
 pub use value::Value;
 
 pub use params::params_from_iter;
+pub use params::IntoParams;
 
-use crate::params::*;
 use std::fmt::Debug;
 use std::num::NonZero;
 use std::sync::{Arc, Mutex};
@@ -54,6 +55,8 @@ pub enum Error {
     MutexError(String),
     #[error("SQL execution failure: `{0}`")]
     SqlExecutionFailure(String),
+    #[error("WAL operation error: `{0}`")]
+    WalOperationError(String),
 }
 
 impl From<turso_core::LimboError> for Error {
@@ -170,6 +173,57 @@ impl Connection {
         stmt.execute(params).await
     }
 
+    pub fn wal_frame_count(&self) -> Result<u64> {
+        let conn = self
+            .inner
+            .lock()
+            .map_err(|e| Error::MutexError(e.to_string()))?;
+        conn.wal_frame_count()
+            .map_err(|e| Error::WalOperationError(format!("wal_insert_begin failed: {e}")))
+    }
+
+    pub fn wal_insert_begin(&self) -> Result<()> {
+        let conn = self
+            .inner
+            .lock()
+            .map_err(|e| Error::MutexError(e.to_string()))?;
+        conn.wal_insert_begin()
+            .map_err(|e| Error::WalOperationError(format!("wal_insert_begin failed: {e}")))
+    }
+
+    pub fn wal_insert_end(&self) -> Result<()> {
+        let conn = self
+            .inner
+            .lock()
+            .map_err(|e| Error::MutexError(e.to_string()))?;
+        conn.wal_insert_end()
+            .map_err(|e| Error::WalOperationError(format!("wal_insert_end failed: {e}")))
+    }
+
+    pub fn wal_insert_frame(&self, frame_no: u32, frame: &[u8]) -> Result<WalInsertInfo> {
+        let conn = self
+            .inner
+            .lock()
+            .map_err(|e| Error::MutexError(e.to_string()))?;
+        conn.wal_insert_frame(frame_no, frame)
+            .map_err(|e| Error::WalOperationError(format!("wal_insert_frame failed: {e}")))
+    }
+
+    pub fn wal_get_frame(&self, frame_no: u32, frame: &mut [u8]) -> Result<()> {
+        let conn = self
+            .inner
+            .lock()
+            .map_err(|e| Error::MutexError(e.to_string()))?;
+        conn.wal_get_frame(frame_no, frame)
+            .map_err(|e| Error::WalOperationError(format!("wal_insert_frame failed: {e}")))
+    }
+
+    /// Execute a batch of SQL statements on the database.
+    pub async fn execute_batch(&self, sql: &str) -> Result<()> {
+        self.prepare_execute_batch(sql).await?;
+        Ok(())
+    }
+
     /// Prepare a SQL statement for later execution.
     pub async fn prepare(&self, sql: &str) -> Result<Statement> {
         let conn = self
@@ -184,6 +238,15 @@ impl Connection {
             inner: Arc::new(Mutex::new(stmt)),
         };
         Ok(statement)
+    }
+
+    async fn prepare_execute_batch(&self, sql: impl AsRef<str>) -> Result<()> {
+        let conn = self
+            .inner
+            .lock()
+            .map_err(|e| Error::MutexError(e.to_string()))?;
+        conn.prepare_execute_batch(sql)?;
+        Ok(())
     }
 
     /// Query a pragma.
@@ -218,7 +281,7 @@ impl Connection {
             .inner
             .lock()
             .map_err(|e| Error::MutexError(e.to_string()))?;
-        conn.cacheflush()?;
+        let res = conn.cacheflush()?;
         Ok(())
     }
 
@@ -308,8 +371,9 @@ impl Statement {
             let mut stmt = self.inner.lock().unwrap();
             match stmt.step() {
                 Ok(turso_core::StepResult::Row) => {
-                    // unexpected row during execution, error out.
-                    return Ok(2);
+                    return Err(Error::SqlExecutionFailure(
+                        "unexpected row during execution".to_string(),
+                    ));
                 }
                 Ok(turso_core::StepResult::Done) => {
                     let changes = stmt.n_change();
@@ -317,14 +381,13 @@ impl Statement {
                     return Ok(changes as u64);
                 }
                 Ok(turso_core::StepResult::IO) => {
-                    let _ = stmt.run_once();
-                    //return Ok(1);
+                    stmt.run_once()?;
                 }
                 Ok(turso_core::StepResult::Busy) => {
-                    return Ok(4);
+                    return Err(Error::SqlExecutionFailure("database is locked".to_string()));
                 }
                 Ok(turso_core::StepResult::Interrupt) => {
-                    return Ok(3);
+                    return Err(Error::SqlExecutionFailure("interrupted".to_string()));
                 }
                 Err(err) => {
                     return Err(err.into());
@@ -350,6 +413,12 @@ impl Statement {
         }
 
         cols
+    }
+
+    /// Reset internal statement state after previous execution so it can be reused again
+    pub fn reset(&self) {
+        let mut stmt = self.inner.lock().unwrap();
+        stmt.reset();
     }
 }
 
@@ -408,23 +477,26 @@ impl Rows {
                 .inner
                 .lock()
                 .map_err(|e| Error::MutexError(e.to_string()))?;
-            match stmt.step() {
-                Ok(turso_core::StepResult::Row) => {
+            match stmt.step()? {
+                turso_core::StepResult::Row => {
                     let row = stmt.row().unwrap();
                     return Ok(Some(Row {
                         values: row.get_values().map(|v| v.to_owned()).collect(),
                     }));
                 }
-                Ok(turso_core::StepResult::Done) => return Ok(None),
-                Ok(turso_core::StepResult::IO) => {
+                turso_core::StepResult::Done => return Ok(None),
+                turso_core::StepResult::IO => {
                     if let Err(e) = stmt.run_once() {
                         return Err(e.into());
                     }
                     continue;
                 }
-                Ok(turso_core::StepResult::Busy) => return Ok(None),
-                Ok(turso_core::StepResult::Interrupt) => return Ok(None),
-                _ => return Ok(None),
+                turso_core::StepResult::Busy => {
+                    return Err(Error::SqlExecutionFailure("database is locked".to_string()))
+                }
+                turso_core::StepResult::Interrupt => {
+                    return Err(Error::SqlExecutionFailure("interrupted".to_string()))
+                }
             }
         }
     }
@@ -552,36 +624,38 @@ mod tests {
             }
         } // db and conn are dropped here, simulating closing
 
-        // Now, re-open the database and check if the data is still there
-        let db = Builder::new_local(db_path).build().await?;
-        let conn = db.connect()?;
+        {
+            // Now, re-open the database and check if the data is still there
+            let db = Builder::new_local(db_path).build().await?;
+            let conn = db.connect()?;
 
-        let mut rows = conn
-            .query("SELECT data FROM test_large_persistence ORDER BY id;", ())
-            .await?;
+            let mut rows = conn
+                .query("SELECT data FROM test_large_persistence ORDER BY id;", ())
+                .await?;
 
-        for (i, value) in original_data.iter().enumerate().take(NUM_INSERTS) {
-            let row = rows
-                .next()
-                .await?
-                .unwrap_or_else(|| panic!("Expected row {i} but found None"));
-            assert_eq!(
-                row.get_value(0)?,
-                Value::Text(value.clone()),
-                "Mismatch in retrieved data for row {i}"
+            for (i, value) in original_data.iter().enumerate().take(NUM_INSERTS) {
+                let row = rows
+                    .next()
+                    .await?
+                    .unwrap_or_else(|| panic!("Expected row {i} but found None"));
+                assert_eq!(
+                    row.get_value(0)?,
+                    Value::Text(value.clone()),
+                    "Mismatch in retrieved data for row {i}"
+                );
+            }
+
+            assert!(
+                rows.next().await?.is_none(),
+                "Expected no more rows after retrieving all inserted data"
             );
+
+            // Delete the WAL file only and try to re-open and query
+            let wal_path = format!("{db_path}-wal");
+            std::fs::remove_file(&wal_path)
+                .map_err(|e| eprintln!("Warning: Failed to delete WAL file for test: {e}"))
+                .unwrap();
         }
-
-        assert!(
-            rows.next().await?.is_none(),
-            "Expected no more rows after retrieving all inserted data"
-        );
-
-        // Delete the WAL file only and try to re-open and query
-        let wal_path = format!("{db_path}-wal");
-        std::fs::remove_file(&wal_path)
-            .map_err(|e| eprintln!("Warning: Failed to delete WAL file for test: {e}"))
-            .unwrap();
 
         // Attempt to re-open the database after deleting WAL and assert that table is missing.
         let db_after_wal_delete = Builder::new_local(db_path).build().await?;

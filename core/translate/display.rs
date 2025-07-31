@@ -1,6 +1,5 @@
 use core::fmt;
 use std::fmt::{Display, Formatter};
-
 use turso_sqlite3_parser::{
     ast::{
         self,
@@ -237,19 +236,17 @@ pub struct PlanContext<'a>(pub &'a [&'a TableReferences]);
 
 // Definitely not perfect yet
 impl ToSqlContext for PlanContext<'_> {
-    fn get_column_name(&self, table_id: TableInternalId, col_idx: usize) -> &str {
+    fn get_column_name(&self, table_id: TableInternalId, col_idx: usize) -> String {
         let table = self
             .0
             .iter()
-            .map(|table_ref| table_ref.find_table_by_internal_id(table_id))
-            .reduce(|accum, curr| match (accum, curr) {
-                (Some(table), _) | (_, Some(table)) => Some(table),
-                _ => None,
-            })
-            .unwrap()
+            .find_map(|table_ref| table_ref.find_table_by_internal_id(table_id))
             .unwrap();
         let cols = table.columns();
-        cols.get(col_idx).unwrap().name.as_ref().unwrap()
+        match cols.get(col_idx).unwrap().name.as_ref() {
+            None => format!("{col_idx}"),
+            Some(n) => n.to_string(),
+        }
     }
 
     fn get_table_name(&self, id: TableInternalId) -> &str {

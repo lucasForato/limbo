@@ -1,4 +1,4 @@
-use std::{cell::Cell, cmp::Ordering, rc::Rc, sync::Arc};
+use std::{cell::Cell, cmp::Ordering, sync::Arc};
 
 use tracing::{instrument, Level};
 use turso_sqlite3_parser::ast::{self, TableInternalId};
@@ -115,11 +115,11 @@ pub struct ProgramBuilder {
 
 #[derive(Debug, Clone)]
 pub enum CursorType {
-    BTreeTable(Rc<BTreeTable>),
+    BTreeTable(Arc<BTreeTable>),
     BTreeIndex(Arc<Index>),
     Pseudo(PseudoCursorType),
     Sorter,
-    VirtualTable(Rc<VirtualTable>),
+    VirtualTable(Arc<VirtualTable>),
 }
 
 impl CursorType {

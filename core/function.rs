@@ -1,6 +1,7 @@
 use std::fmt;
 use std::fmt::{Debug, Display};
 use std::rc::Rc;
+use std::sync::Arc;
 use turso_ext::{FinalizeFunction, InitAggFunction, ScalarFunction, StepFunction};
 
 use crate::LimboError;
@@ -157,6 +158,8 @@ pub enum VectorFunc {
     VectorExtract,
     VectorDistanceCos,
     VectorDistanceEuclidean,
+    VectorConcat,
+    VectorSlice,
 }
 
 impl VectorFunc {
@@ -175,6 +178,8 @@ impl Display for VectorFunc {
             Self::VectorDistanceCos => "vector_distance_cos".to_string(),
             // We use `distance_l2` to reduce user input
             Self::VectorDistanceEuclidean => "vector_distance_l2".to_string(),
+            Self::VectorConcat => "vector_concat".to_string(),
+            Self::VectorSlice => "vector_slice".to_string(),
         };
         write!(f, "{str}")
     }
@@ -315,6 +320,7 @@ pub enum ScalarFunc {
     LastInsertRowid,
     Replace,
     #[cfg(feature = "fs")]
+    #[cfg(not(target_family = "wasm"))]
     LoadExtension,
     StrfTime,
     Printf,
@@ -376,6 +382,7 @@ impl ScalarFunc {
             ScalarFunc::LastInsertRowid => false,
             ScalarFunc::Replace => true,
             #[cfg(feature = "fs")]
+            #[cfg(not(target_family = "wasm"))]
             ScalarFunc::LoadExtension => true,
             ScalarFunc::StrfTime => false,
             ScalarFunc::Printf => false,
@@ -439,6 +446,7 @@ impl Display for ScalarFunc {
             Self::Replace => "replace".to_string(),
             Self::DateTime => "datetime".to_string(),
             #[cfg(feature = "fs")]
+            #[cfg(not(target_family = "wasm"))]
             Self::LoadExtension => "load_extension".to_string(),
             Self::StrfTime => "strftime".to_string(),
             Self::Printf => "printf".to_string(),
@@ -593,7 +601,7 @@ pub enum Func {
     #[cfg(feature = "json")]
     Json(JsonFunc),
     AlterTable(AlterTableFunc),
-    External(Rc<ExternalFunc>),
+    External(Arc<ExternalFunc>),
 }
 
 impl Display for Func {
@@ -824,6 +832,7 @@ impl Func {
             "tanh" => Ok(Self::Math(MathFunc::Tanh)),
             "trunc" => Ok(Self::Math(MathFunc::Trunc)),
             #[cfg(feature = "fs")]
+            #[cfg(not(target_family = "wasm"))]
             "load_extension" => Ok(Self::Scalar(ScalarFunc::LoadExtension)),
             "strftime" => Ok(Self::Scalar(ScalarFunc::StrfTime)),
             "printf" => Ok(Self::Scalar(ScalarFunc::Printf)),
@@ -833,6 +842,8 @@ impl Func {
             "vector_extract" => Ok(Self::Vector(VectorFunc::VectorExtract)),
             "vector_distance_cos" => Ok(Self::Vector(VectorFunc::VectorDistanceCos)),
             "vector_distance_l2" => Ok(Self::Vector(VectorFunc::VectorDistanceEuclidean)),
+            "vector_concat" => Ok(Self::Vector(VectorFunc::VectorConcat)),
+            "vector_slice" => Ok(Self::Vector(VectorFunc::VectorSlice)),
             _ => crate::bail_parse_error!("no such function: {}", name),
         }
     }

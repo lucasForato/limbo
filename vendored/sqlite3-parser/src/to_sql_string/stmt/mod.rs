@@ -54,7 +54,11 @@ mod tests {
     // Placeholders for compilation
     // Context only necessary parsing inside turso_core or in the simulator
     impl ToSqlContext for TestContext {
-        fn get_column_name(&self, _table_id: crate::ast::TableInternalId, _col_idx: usize) -> &str {
+        fn get_column_name(
+            &self,
+            _table_id: crate::ast::TableInternalId,
+            _col_idx: usize,
+        ) -> String {
             todo!()
         }
 

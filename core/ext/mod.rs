@@ -97,7 +97,7 @@ pub(crate) unsafe extern "C" fn register_scalar_function(
     unsafe {
         (*ext_ctx.syms).functions.insert(
             name_str.clone(),
-            Rc::new(ExternalFunc::new_scalar(name_str, func)),
+            Arc::new(ExternalFunc::new_scalar(name_str, func)),
         );
     }
     ResultCode::OK
@@ -123,7 +123,7 @@ pub(crate) unsafe extern "C" fn register_aggregate_function(
     unsafe {
         (*ext_ctx.syms).functions.insert(
             name_str.clone(),
-            Rc::new(ExternalFunc::new_aggregate(
+            Arc::new(ExternalFunc::new_aggregate(
                 name_str,
                 args,
                 (init_func, step_func, finalize_func),

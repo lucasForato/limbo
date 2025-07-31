@@ -41,11 +41,12 @@ fn test_wal_frame_transfer_no_schema_changes() {
     assert_eq!(conn1.wal_frame_count().unwrap(), 15);
     let mut frame = [0u8; 24 + 4096];
     conn2.wal_insert_begin().unwrap();
-    for frame_id in 1..=conn1.wal_frame_count().unwrap() as u32 {
-        let c = conn1.wal_get_frame(frame_id, &mut frame).unwrap();
-        db1.io.wait_for_completion(c).unwrap();
+    let frames_count = conn1.wal_frame_count().unwrap() as u32;
+    for frame_id in 1..=frames_count {
+        conn1.wal_get_frame(frame_id, &mut frame).unwrap();
         conn2.wal_insert_frame(frame_id, &frame).unwrap();
     }
+
     conn2.wal_insert_end().unwrap();
     assert_eq!(conn2.wal_frame_count().unwrap(), 15);
     assert_eq!(
@@ -74,8 +75,7 @@ fn test_wal_frame_transfer_various_schema_changes() {
         let last_frame = conn1.wal_frame_count().unwrap() as u32;
         conn2.wal_insert_begin().unwrap();
         for frame_id in (synced_frame + 1)..=last_frame {
-            let c = conn1.wal_get_frame(frame_id, &mut frame).unwrap();
-            db1.io.wait_for_completion(c).unwrap();
+            conn1.wal_get_frame(frame_id, &mut frame).unwrap();
             conn2.wal_insert_frame(frame_id, &frame).unwrap();
         }
         conn2.wal_insert_end().unwrap();
@@ -135,13 +135,17 @@ fn test_wal_frame_transfer_schema_changes() {
         .unwrap();
     assert_eq!(conn1.wal_frame_count().unwrap(), 15);
     let mut frame = [0u8; 24 + 4096];
+    let mut commits = 0;
     conn2.wal_insert_begin().unwrap();
     for frame_id in 1..=conn1.wal_frame_count().unwrap() as u32 {
-        let c = conn1.wal_get_frame(frame_id, &mut frame).unwrap();
-        db1.io.wait_for_completion(c).unwrap();
-        conn2.wal_insert_frame(frame_id, &frame).unwrap();
+        conn1.wal_get_frame(frame_id, &mut frame).unwrap();
+        let info = conn2.wal_insert_frame(frame_id, &frame).unwrap();
+        if info.is_commit {
+            commits += 1;
+        }
     }
     conn2.wal_insert_end().unwrap();
+    assert_eq!(commits, 3);
     assert_eq!(conn2.wal_frame_count().unwrap(), 15);
     assert_eq!(
         limbo_exec_rows(&db2, &conn2, "SELECT x, length(y) FROM t"),
@@ -171,9 +175,9 @@ fn test_wal_frame_transfer_no_schema_changes_rollback() {
     assert_eq!(conn1.wal_frame_count().unwrap(), 14);
     let mut frame = [0u8; 24 + 4096];
     conn2.wal_insert_begin().unwrap();
+    // Intentionally leave out the final commit frame, so the big randomblob is not committed and should not be visible to transactions.
     for frame_id in 1..=(conn1.wal_frame_count().unwrap() as u32 - 1) {
-        let c = conn1.wal_get_frame(frame_id, &mut frame).unwrap();
-        db1.io.wait_for_completion(c).unwrap();
+        conn1.wal_get_frame(frame_id, &mut frame).unwrap();
         conn2.wal_insert_frame(frame_id, &frame).unwrap();
     }
     conn2.wal_insert_end().unwrap();
@@ -208,8 +212,7 @@ fn test_wal_frame_transfer_schema_changes_rollback() {
     let mut frame = [0u8; 24 + 4096];
     conn2.wal_insert_begin().unwrap();
     for frame_id in 1..=(conn1.wal_frame_count().unwrap() as u32 - 1) {
-        let c = conn1.wal_get_frame(frame_id, &mut frame).unwrap();
-        db1.io.wait_for_completion(c).unwrap();
+        conn1.wal_get_frame(frame_id, &mut frame).unwrap();
         conn2.wal_insert_frame(frame_id, &frame).unwrap();
     }
     conn2.wal_insert_end().unwrap();
@@ -243,8 +246,7 @@ fn test_wal_frame_conflict() {
     assert_eq!(conn1.wal_frame_count().unwrap(), 2);
     let mut frame = [0u8; 24 + 4096];
     conn2.wal_insert_begin().unwrap();
-    let c = conn1.wal_get_frame(1, &mut frame).unwrap();
-    db1.io.wait_for_completion(c).unwrap();
+    conn1.wal_get_frame(1, &mut frame).unwrap();
     assert!(conn2.wal_insert_frame(1, &frame).is_err());
 }
 
@@ -267,12 +269,10 @@ fn test_wal_frame_far_away_write() {
     let mut frame = [0u8; 24 + 4096];
     conn2.wal_insert_begin().unwrap();
 
-    let c = conn1.wal_get_frame(3, &mut frame).unwrap();
-    db1.io.wait_for_completion(c).unwrap();
+    conn1.wal_get_frame(3, &mut frame).unwrap();
     conn2.wal_insert_frame(3, &frame).unwrap();
 
-    let c = conn1.wal_get_frame(5, &mut frame).unwrap();
-    db1.io.wait_for_completion(c).unwrap();
+    conn1.wal_get_frame(5, &mut frame).unwrap();
     assert!(conn2.wal_insert_frame(5, &frame).is_err());
 }
 
@@ -311,8 +311,7 @@ fn test_wal_frame_api_no_schema_changes_fuzz() {
                 let mut frame = [0u8; 24 + 4096];
                 conn2.wal_insert_begin().unwrap();
                 for frame_no in (synced_frame + 1)..=next_frame {
-                    let c = conn1.wal_get_frame(frame_no as u32, &mut frame).unwrap();
-                    db1.io.wait_for_completion(c).unwrap();
+                    conn1.wal_get_frame(frame_no as u32, &mut frame).unwrap();
                     conn2.wal_insert_frame(frame_no as u32, &frame[..]).unwrap();
                 }
                 conn2.wal_insert_end().unwrap();

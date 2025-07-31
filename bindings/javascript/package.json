@@ -1,28 +1,37 @@
 {
   "name": "@tursodatabase/turso",
-  "version": "0.1.3-pre.5",
+  "version": "0.1.3",
   "repository": {
     "type": "git",
     "url": "https://github.com/tursodatabase/turso"
   },
   "description": "The Turso database library",
-  "main": "wrapper.js",
+  "main": "promise.js",
+  "exports": {
+    ".": "./promise.js",
+    "./sync": "./sync.js"
+  },
+  "files": [
+    "browser.js",
+    "index.js",
+    "promise.js",
+    "sqlite-error.js",
+    "sync.js"
+  ],
   "types": "index.d.ts",
   "napi": {
-    "name": "turso",
-    "release": false,
-    "triples": {
-      "defaults": false,
-      "additional": [
-        "x86_64-unknown-linux-gnu",
-        "x86_64-pc-windows-msvc",
-        "universal-apple-darwin"
-      ]
-    }
+    "binaryName": "turso",
+    "targets": [
+      "x86_64-unknown-linux-gnu",
+      "x86_64-pc-windows-msvc",
+      "universal-apple-darwin",
+      "wasm32-wasip1-threads"
+    ]
   },
   "license": "MIT",
   "devDependencies": {
-    "@napi-rs/cli": "^2.18.4",
+    "@napi-rs/cli": "^3.0.4",
+    "@napi-rs/wasm-runtime": "^1.0.1",
     "ava": "^6.0.1",
     "better-sqlite3": "^11.9.1"
   },
@@ -37,9 +46,9 @@
     "build": "napi build --platform --release",
     "build:debug": "napi build --platform",
     "prepublishOnly": "napi prepublish -t npm",
-    "test": "ava",
-    "universal": "napi universal",
+    "test": "ava -s",
+    "universal": "napi universalize",
     "version": "napi version"
   },
-  "packageManager": "yarn@4.6.0"
+  "packageManager": "yarn@4.9.2"
 }

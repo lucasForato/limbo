@@ -7,14 +7,15 @@ use crate::storage::page_cache::DumbLruPageCache;
 use crate::storage::pager::{AtomicDbState, CreateBTreeFlags, DbState};
 use crate::storage::sqlite3_ondisk::read_varint;
 use crate::storage::wal::DummyWAL;
-use crate::storage::{self, header_accessor};
 use crate::translate::collate::CollationSeq;
 use crate::types::{
-    compare_immutable, compare_records_generic, ImmutableRecord, SeekResult, Text, TextSubtype,
+    compare_immutable, compare_records_generic, Extendable, ImmutableRecord, RawSlice, SeekResult,
+    Text, TextRef, TextSubtype,
 };
-use crate::util::normalize_ident;
+use crate::util::{normalize_ident, IOExt as _};
 use crate::vdbe::insn::InsertFlags;
 use crate::vdbe::registers_to_ref_values;
+use crate::vector::{vector_concat, vector_slice};
 use crate::{
     error::{
         LimboError, SQLITE_CONSTRAINT, SQLITE_CONSTRAINT_NOTNULL, SQLITE_CONSTRAINT_PRIMARYKEY,
@@ -45,7 +46,10 @@ use crate::{
 
 use crate::{
     storage::wal::CheckpointResult,
-    types::{AggContext, Cursor, ExternalAggState, IOResult, SeekKey, SeekOp, Value, ValueType},
+    types::{
+        AggContext, Cursor, ExternalAggState, IOResult, SeekKey, SeekOp, SumAggState, Value,
+        ValueType,
+    },
     util::{
         cast_real_to_integer, cast_text_to_integer, cast_text_to_numeric, cast_text_to_real,
         checked_cast_text_to_numeric, parse_schema_rows, RoundToPrecision,
@@ -57,7 +61,10 @@ use crate::{
     vector::{vector32, vector64, vector_distance_cos, vector_distance_l2, vector_extract},
 };
 
-use crate::{info, BufferPool, MvCursor, OpenFlags, RefValue, Row, StepResult, TransactionState};
+use crate::{
+    info, turso_assert, BufferPool, MvCursor, OpenFlags, RefValue, Row, StepResult,
+    TransactionState,
+};
 
 use super::{
     insn::{Cookie, RegisterOrLiteral},
@@ -117,6 +124,18 @@ pub enum InsnFunctionStepResult {
     Interrupt,
     Busy,
     Step,
+}
+
+impl From<StepResult> for InsnFunctionStepResult {
+    fn from(value: StepResult) -> Self {
+        match value {
+            super::StepResult::Done => Self::Done,
+            super::StepResult::IO => Self::IO,
+            super::StepResult::Row => Self::Row,
+            super::StepResult::Interrupt => Self::Interrupt,
+            super::StepResult::Busy => Self::Busy,
+        }
+    }
 }
 
 pub fn op_init(
@@ -309,17 +328,18 @@ pub fn op_checkpoint(
 ) -> Result<InsnFunctionStepResult> {
     let Insn::Checkpoint {
         database: _,
-        checkpoint_mode: _,
+        checkpoint_mode,
         dest,
     } = insn
     else {
         unreachable!("unexpected Insn {:?}", insn)
     };
-    let result = program.connection.checkpoint();
+    let result = program.connection.checkpoint(*checkpoint_mode);
     match result {
         Ok(CheckpointResult {
             num_wal_frames: num_wal_pages,
             num_checkpointed_frames: num_checkpointed_pages,
+            ..
         }) => {
             // https://sqlite.org/pragma.html#pragma_wal_checkpoint
             // 1st col: 1 (checkpoint SQLITE_BUSY) or 0 (not busy).
@@ -1417,18 +1437,18 @@ pub fn op_column(
                 let cursor = cursor.as_btree_mut();
 
                 if cursor.get_null_flag() {
-                    break 'value Value::Null;
+                    break 'value Some(RefValue::Null);
                 }
 
                 let record_result = return_if_io!(cursor.record());
                 let Some(record) = record_result.as_ref() else {
-                    break 'value default.clone().unwrap_or(Value::Null);
+                    break 'value None;
                 };
 
                 let payload = record.get_payload();
 
                 if payload.is_empty() {
-                    break 'value default.clone().unwrap_or(Value::Null);
+                    break 'value None;
                 }
 
                 let mut record_cursor = cursor.record_cursor.borrow_mut();
@@ -1504,25 +1524,25 @@ pub fn op_column(
                     record_cursor.offsets.clear();
                     record_cursor.header_offset = 0;
                     record_cursor.header_size = 0;
-                    break 'value default.clone().unwrap_or(Value::Null);
+                    break 'value None;
                 }
 
                 if target_column >= record_cursor.serial_types.len() {
-                    break 'value default.clone().unwrap_or(Value::Null);
+                    break 'value None;
                 }
 
                 let serial_type = record_cursor.serial_types[target_column];
 
                 // Fast path for common constant cases
                 match serial_type {
-                    0 => break 'value Value::Null,
-                    8 => break 'value Value::Integer(0),
-                    9 => break 'value Value::Integer(1),
+                    0 => break 'value Some(RefValue::Null),
+                    8 => break 'value Some(RefValue::Integer(0)),
+                    9 => break 'value Some(RefValue::Integer(1)),
                     _ => {}
                 }
 
                 if target_column + 1 >= record_cursor.offsets.len() {
-                    break 'value default.clone().unwrap_or(Value::Null);
+                    break 'value None;
                 }
 
                 let start_offset = record_cursor.offsets[target_column];
@@ -1544,7 +1564,10 @@ pub fn op_column(
                         };
 
                         if data_len >= expected_len {
-                            Value::Integer(read_integer_fast(data_slice, expected_len))
+                            Some(RefValue::Integer(read_integer_fast(
+                                data_slice,
+                                expected_len,
+                            )))
                         } else {
                             return Err(LimboError::Corrupt(format!(
                                 "Insufficient data for integer type {serial_type}: expected {expected_len}, got {data_len}"
@@ -1563,41 +1586,60 @@ pub fn op_column(
                                 data_slice[6],
                                 data_slice[7],
                             ];
-                            Value::Float(f64::from_be_bytes(bytes))
+                            Some(RefValue::Float(f64::from_be_bytes(bytes)))
                         } else {
-                            default.clone().unwrap_or(Value::Null)
+                            None
                         }
                     }
-                    n if n >= 12 && n % 2 == 0 => Value::Blob(data_slice.to_vec()),
-                    n if n >= 13 && n % 2 == 1 => Value::Text(Text {
-                        value: data_slice.to_vec(),
-                        subtype: TextSubtype::Text,
-                    }),
-                    _ => default.clone().unwrap_or(Value::Null),
+                    n if n >= 12 && n % 2 == 0 => {
+                        Some(RefValue::Blob(RawSlice::create_from(data_slice)))
+                    }
+                    n if n >= 13 && n % 2 == 1 => Some(RefValue::Text(TextRef::create_from(
+                        data_slice,
+                        TextSubtype::Text,
+                    ))),
+                    _ => None,
                 }
+            };
+
+            let Some(value) = value else {
+                // DEFAULT handling. Try to reuse the registers when allocation is not needed.
+                let Some(ref default) = default else {
+                    state.registers[*dest] = Register::Value(Value::Null);
+                    state.pc += 1;
+                    return Ok(InsnFunctionStepResult::Step);
+                };
+                match (default, &mut state.registers[*dest]) {
+                    (Value::Text(new_text), Register::Value(Value::Text(existing_text))) => {
+                        existing_text.do_extend(new_text);
+                    }
+                    (Value::Blob(new_blob), Register::Value(Value::Blob(existing_blob))) => {
+                        existing_blob.do_extend(new_blob);
+                    }
+                    _ => {
+                        state.registers[*dest] = Register::Value(default.clone());
+                    }
+                }
+                state.pc += 1;
+                return Ok(InsnFunctionStepResult::Step);
             };
 
             // Try to reuse the registers when allocation is not needed.
             match (&value, &mut state.registers[*dest]) {
-                (Value::Text(new_text), Register::Value(Value::Text(existing_text))) => {
-                    if existing_text.value.capacity() >= new_text.value.len() {
-                        existing_text.value.clear();
-                        existing_text.value.extend_from_slice(&new_text.value);
-                        existing_text.subtype = new_text.subtype;
-                    } else {
-                        state.registers[*dest] = Register::Value(value);
-                    }
+                (RefValue::Text(new_text), Register::Value(Value::Text(existing_text))) => {
+                    existing_text.do_extend(new_text);
                 }
-                (Value::Blob(new_blob), Register::Value(Value::Blob(existing_blob))) => {
-                    if existing_blob.capacity() >= new_blob.len() {
-                        existing_blob.clear();
-                        existing_blob.extend_from_slice(new_blob);
-                    } else {
-                        state.registers[*dest] = Register::Value(value);
-                    }
+                (RefValue::Blob(new_blob), Register::Value(Value::Blob(existing_blob))) => {
+                    existing_blob.do_extend(new_blob);
                 }
                 _ => {
-                    state.registers[*dest] = Register::Value(value);
+                    state.registers[*dest] = Register::Value(match value {
+                        RefValue::Integer(i) => Value::Integer(i),
+                        RefValue::Float(f) => Value::Float(f),
+                        RefValue::Text(t) => Value::Text(Text::new(t.as_str())),
+                        RefValue::Blob(b) => Value::Blob(b.to_slice().to_vec()),
+                        RefValue::Null => Value::Null,
+                    });
                 }
             }
         }
@@ -1943,6 +1985,20 @@ pub fn op_transaction(
     } else {
         let current_state = conn.transaction_state.get();
         let (new_transaction_state, updated) = match (current_state, write) {
+            // pending state means that we tried beginning a tx and the method returned IO.
+            // instead of ending the read tx, just update the state to pending.
+            (TransactionState::PendingUpgrade, write) => {
+                turso_assert!(
+                    *write,
+                    "pending upgrade should only be set for write transactions"
+                );
+                (
+                    TransactionState::Write {
+                        schema_did_change: false,
+                    },
+                    true,
+                )
+            }
             (TransactionState::Write { schema_did_change }, true) => {
                 (TransactionState::Write { schema_did_change }, false)
             }
@@ -1964,7 +2020,6 @@ pub fn op_transaction(
             ),
             (TransactionState::None, false) => (TransactionState::Read, true),
         };
-
         if updated && matches!(current_state, TransactionState::None) {
             if let LimboResult::Busy = pager.begin_read_tx()? {
                 return Ok(InsnFunctionStepResult::Busy);
@@ -1976,11 +2031,18 @@ pub fn op_transaction(
                 IOResult::Done(r) => {
                     if let LimboResult::Busy = r {
                         pager.end_read_tx()?;
+                        conn.transaction_state.replace(TransactionState::None);
+                        conn.auto_commit.replace(true);
                         return Ok(InsnFunctionStepResult::Busy);
                     }
                 }
                 IOResult::IO => {
-                    pager.end_read_tx()?;
+                    // set the transaction state to pending so we don't have to
+                    // end the read transaction.
+                    program
+                        .connection
+                        .transaction_state
+                        .replace(TransactionState::PendingUpgrade);
                     return Ok(InsnFunctionStepResult::IO);
                 }
             }
@@ -2009,13 +2071,9 @@ pub fn op_auto_commit(
     };
     let conn = program.connection.clone();
     if state.commit_state == CommitState::Committing {
-        return match program.commit_txn(pager.clone(), state, mv_store, *rollback)? {
-            super::StepResult::Done => Ok(InsnFunctionStepResult::Done),
-            super::StepResult::IO => Ok(InsnFunctionStepResult::IO),
-            super::StepResult::Row => Ok(InsnFunctionStepResult::Row),
-            super::StepResult::Interrupt => Ok(InsnFunctionStepResult::Interrupt),
-            super::StepResult::Busy => Ok(InsnFunctionStepResult::Busy),
-        };
+        return program
+            .commit_txn(pager.clone(), state, mv_store, *rollback)
+            .map(Into::into);
     }
     let schema_did_change =
         if let TransactionState::Write { schema_did_change } = conn.transaction_state.get() {
@@ -2027,7 +2085,8 @@ pub fn op_auto_commit(
     if *auto_commit != conn.auto_commit.get() {
         if *rollback {
             // TODO(pere): add rollback I/O logic once we implement rollback journal
-            pager.rollback(schema_did_change, &conn)?;
+            return_if_io!(pager.end_tx(true, schema_did_change, &conn, false));
+            conn.transaction_state.replace(TransactionState::None);
             conn.auto_commit.replace(true);
         } else {
             conn.auto_commit.replace(*auto_commit);
@@ -2045,13 +2104,9 @@ pub fn op_auto_commit(
             "cannot commit - no transaction is active".to_string(),
         ));
     }
-    match program.commit_txn(pager.clone(), state, mv_store, *rollback)? {
-        super::StepResult::Done => Ok(InsnFunctionStepResult::Done),
-        super::StepResult::IO => Ok(InsnFunctionStepResult::IO),
-        super::StepResult::Row => Ok(InsnFunctionStepResult::Row),
-        super::StepResult::Interrupt => Ok(InsnFunctionStepResult::Interrupt),
-        super::StepResult::Busy => Ok(InsnFunctionStepResult::Busy),
-    }
+    program
+        .commit_txn(pager.clone(), state, mv_store, *rollback)
+        .map(Into::into)
 }
 
 pub fn op_goto(
@@ -3044,6 +3099,33 @@ pub fn op_decr_jump_zero(
     Ok(InsnFunctionStepResult::Step)
 }
 
+fn apply_kbn_step(acc: &mut Value, r: f64, state: &mut SumAggState) {
+    let s = acc.as_float();
+    let t = s + r;
+    let correction = if s.abs() > r.abs() {
+        (s - t) + r
+    } else {
+        (r - t) + s
+    };
+    state.r_err += correction;
+    *acc = Value::Float(t);
+}
+
+// Add a (possibly large) integer to the running sum.
+fn apply_kbn_step_int(acc: &mut Value, i: i64, state: &mut SumAggState) {
+    const THRESHOLD: i64 = 4503599627370496; // 2^52
+
+    if i <= -THRESHOLD || i >= THRESHOLD {
+        let i_sm = i % 16384;
+        let i_big = i - i_sm;
+
+        apply_kbn_step(acc, i_big as f64, state);
+        apply_kbn_step(acc, i_sm as f64, state);
+    } else {
+        apply_kbn_step(acc, i as f64, state);
+    }
+}
+
 pub fn op_agg_step(
     program: &Program,
     state: &mut ProgramState,
@@ -3065,12 +3147,14 @@ pub fn op_agg_step(
             AggFunc::Avg => {
                 Register::Aggregate(AggContext::Avg(Value::Float(0.0), Value::Integer(0)))
             }
-            AggFunc::Sum => Register::Aggregate(AggContext::Sum(Value::Null, false)),
+            AggFunc::Sum => {
+                Register::Aggregate(AggContext::Sum(Value::Null, SumAggState::default()))
+            }
             AggFunc::Total => {
                 // The result of total() is always a floating point value.
                 // No overflow error is ever raised if any prior input was a floating point value.
                 // Total() never throws an integer overflow.
-                Register::Aggregate(AggContext::Sum(Value::Float(0.0), false))
+                Register::Aggregate(AggContext::Sum(Value::Float(0.0), SumAggState::default()))
             }
             AggFunc::Count | AggFunc::Count0 => {
                 Register::Aggregate(AggContext::Count(Value::Integer(0)))
@@ -3128,31 +3212,61 @@ pub fn op_agg_step(
                     state.registers[*acc_reg], *acc_reg
                 );
             };
-            let AggContext::Sum(acc, has_non_numeric) = agg.borrow_mut() else {
+            let AggContext::Sum(acc, sum_state) = agg.borrow_mut() else {
                 unreachable!();
             };
             match col {
                 Register::Value(owned_value) => {
                     match owned_value {
-                        Value::Integer(_) | Value::Float(_) => {
-                            // Promote accumulator to float if mixing integer and float
-                            if matches!((&*acc, &owned_value), (Value::Integer(_), Value::Float(_)))
-                                || matches!(
-                                    (&*acc, &owned_value),
-                                    (Value::Float(_), Value::Integer(_))
-                                )
-                            {
-                                if let Value::Integer(i) = acc {
-                                    *acc = Value::Float(*i as f64);
+                        Value::Null => {
+                            // Ignore NULLs
+                        }
+
+                        Value::Integer(i) => match acc {
+                            Value::Null => {
+                                *acc = Value::Integer(i);
+                            }
+                            Value::Integer(acc_i) => {
+                                match acc_i.checked_add(i) {
+                                    Some(sum) => *acc = Value::Integer(sum),
+                                    None => {
+                                        // Overflow -> switch to float with KBN summation
+                                        let acc_f = *acc_i as f64;
+                                        *acc = Value::Float(acc_f);
+                                        sum_state.approx = true;
+                                        sum_state.ovrfl = true;
+
+                                        apply_kbn_step_int(acc, i, sum_state);
+                                    }
                                 }
                             }
-                            *acc += owned_value;
-                        }
-                        Value::Null => {
-                            // Null values are ignored in sum
-                        }
+                            Value::Float(_) => {
+                                apply_kbn_step_int(acc, i, sum_state);
+                            }
+                            _ => unreachable!(),
+                        },
+
+                        Value::Float(f) => match acc {
+                            Value::Null => {
+                                *acc = Value::Float(f);
+                            }
+                            Value::Integer(i) => {
+                                let i_f = *i as f64;
+                                *acc = Value::Float(i_f);
+                                sum_state.approx = true;
+                                apply_kbn_step(acc, f, sum_state);
+                            }
+                            Value::Float(_) => {
+                                sum_state.approx = true;
+                                apply_kbn_step(acc, f, sum_state);
+                            }
+                            _ => unreachable!(),
+                        },
+
                         _ => {
-                            *has_non_numeric = true;
+                            //  If any input to sum() is neither an integer nor a NULL, then sum() returns a float
+                            // https://sqlite.org/lang_aggfunc.html
+                            sum_state.approx = true;
                         }
                     }
                 }
@@ -3337,44 +3451,30 @@ pub fn op_agg_final(
                 state.registers[*register] = Register::Value(acc.clone());
             }
             AggFunc::Sum => {
-                let AggContext::Sum(acc, has_non_numeric) = agg.borrow_mut() else {
+                let AggContext::Sum(acc, sum_state) = agg.borrow_mut() else {
                     unreachable!();
                 };
                 let value = match acc {
-                    Value::Integer(i) => {
-                        if *has_non_numeric {
-                            Value::Float(*i as f64)
-                        } else {
-                            Value::Integer(*i)
-                        }
+                    Value::Null => match sum_state.approx {
+                        true => Value::Float(0.0),
+                        false => Value::Null,
+                    },
+                    Value::Integer(i) if !sum_state.approx && !sum_state.ovrfl => {
+                        Value::Integer(*i)
                     }
-                    Value::Float(f) => Value::Float(*f),
-                    _ => {
-                        if *has_non_numeric {
-                            // Non-numeric values encountered
-                            Value::Float(0.0)
-                        } else {
-                            // Only NULL values encountered
-                            Value::Null
-                        }
-                    }
+                    _ => Value::Float(acc.as_float() + sum_state.r_err),
                 };
                 state.registers[*register] = Register::Value(value);
             }
             AggFunc::Total => {
-                let AggContext::Sum(acc, has_non_numeric) = agg.borrow_mut() else {
+                let AggContext::Sum(acc, _) = agg.borrow_mut() else {
                     unreachable!();
                 };
                 let value = match acc {
-                    Value::Integer(i) => {
-                        if *has_non_numeric {
-                            Value::Float(*i as f64)
-                        } else {
-                            Value::Integer(*i)
-                        }
-                    }
+                    Value::Null => Value::Float(0.0),
+                    Value::Integer(i) => Value::Float(*i as f64),
                     Value::Float(f) => Value::Float(*f),
-                    _ => Value::Float(0.0),
+                    _ => unreachable!(),
                 };
                 state.registers[*register] = Register::Value(value);
             }
@@ -3489,8 +3589,12 @@ pub fn op_sorter_open(
     };
     let cache_size = program.connection.get_cache_size();
     // Set the buffer size threshold to be roughly the same as the limit configured for the page-cache.
-    let page_size = header_accessor::get_page_size(pager)
-        .unwrap_or(storage::sqlite3_ondisk::DEFAULT_PAGE_SIZE) as usize;
+    let page_size = pager
+        .io
+        .block(|| pager.with_header(|header| header.page_size))
+        .unwrap_or_default()
+        .get() as usize;
+
     let max_buffer_size_bytes = if cache_size < 0 {
         (cache_size.abs() * 1024) as usize
     } else {
@@ -4241,7 +4345,8 @@ pub fn op_function(
                 }
             }
             ScalarFunc::SqliteVersion => {
-                let version_integer: i64 = header_accessor::get_version_number(pager)? as i64;
+                let version_integer =
+                    return_if_io!(pager.with_header(|header| header.version_number)).get() as i64;
                 let version = execute_sqlite_version(version_integer);
                 state.registers[*dest] = Register::Value(Value::build_text(version));
             }
@@ -4265,6 +4370,7 @@ pub fn op_function(
                 ));
             }
             #[cfg(feature = "fs")]
+            #[cfg(not(target_family = "wasm"))]
             ScalarFunc::LoadExtension => {
                 let extension = &state.registers[*start_reg];
                 let ext = resolve_ext_path(&extension.get_owned_value().to_string())?;
@@ -4484,6 +4590,14 @@ pub fn op_function(
                 let result =
                     vector_distance_l2(&state.registers[*start_reg..*start_reg + arg_count])?;
                 state.registers[*dest] = Register::Value(result);
+            }
+            VectorFunc::VectorConcat => {
+                let result = vector_concat(&state.registers[*start_reg..*start_reg + arg_count])?;
+                state.registers[*dest] = Register::Value(result);
+            }
+            VectorFunc::VectorSlice => {
+                let result = vector_slice(&state.registers[*start_reg..*start_reg + arg_count])?;
+                state.registers[*dest] = Register::Value(result)
             }
         },
         crate::function::Func::External(f) => match f.func {
@@ -5901,8 +6015,12 @@ pub fn op_page_count(
         // TODO: implement temp databases
         todo!("temp databases not implemented yet");
     }
-    let count = header_accessor::get_database_size(pager).unwrap_or(0);
-    state.registers[*dest] = Register::Value(Value::Integer(count as i64));
+    let count = match pager.with_header(|header| header.database_size.get()) {
+        Err(_) => 0.into(),
+        Ok(IOResult::Done(v)) => v.into(),
+        Ok(IOResult::IO) => return Ok(InsnFunctionStepResult::IO),
+    };
+    state.registers[*dest] = Register::Value(Value::Integer(count));
     state.pc += 1;
     Ok(InsnFunctionStepResult::Step)
 }
@@ -5961,15 +6079,19 @@ pub fn op_read_cookie(
         // TODO: implement temp databases
         todo!("temp databases not implemented yet");
     }
-    let cookie_value = match cookie {
-        Cookie::ApplicationId => header_accessor::get_application_id(pager).unwrap_or(0) as i64,
-        Cookie::UserVersion => header_accessor::get_user_version(pager).unwrap_or(0) as i64,
-        Cookie::SchemaVersion => header_accessor::get_schema_cookie(pager).unwrap_or(0) as i64,
-        Cookie::LargestRootPageNumber => {
-            header_accessor::get_vacuum_mode_largest_root_page(pager).unwrap_or(0) as i64
-        }
+
+    let cookie_value = match pager.with_header(|header| match cookie {
+        Cookie::ApplicationId => header.application_id.get().into(),
+        Cookie::UserVersion => header.user_version.get().into(),
+        Cookie::SchemaVersion => header.schema_cookie.get().into(),
+        Cookie::LargestRootPageNumber => header.vacuum_mode_largest_root_page.get().into(),
         cookie => todo!("{cookie:?} is not yet implement for ReadCookie"),
+    }) {
+        Err(_) => 0.into(),
+        Ok(IOResult::Done(v)) => v,
+        Ok(IOResult::IO) => return Ok(InsnFunctionStepResult::IO),
     };
+
     state.registers[*dest] = Register::Value(Value::Integer(cookie_value));
     state.pc += 1;
     Ok(InsnFunctionStepResult::Step)
@@ -5994,37 +6116,38 @@ pub fn op_set_cookie(
     if *db > 0 {
         todo!("temp databases not implemented yet");
     }
-    match cookie {
-        Cookie::ApplicationId => {
-            header_accessor::set_application_id(pager, *value)?;
-        }
-        Cookie::UserVersion => {
-            header_accessor::set_user_version(pager, *value)?;
-        }
-        Cookie::LargestRootPageNumber => {
-            header_accessor::set_vacuum_mode_largest_root_page(pager, *value as u32)?;
-        }
-        Cookie::IncrementalVacuum => {
-            header_accessor::set_incremental_vacuum_enabled(pager, *value as u32)?;
-        }
-        Cookie::SchemaVersion => {
-            if mv_store.is_none() {
-                // we update transaction state to indicate that the schema has changed
-                match program.connection.transaction_state.get() {
-                    TransactionState::Write { schema_did_change } => {
-                        program.connection.transaction_state.set(TransactionState::Write { schema_did_change: true });
-                    },
-                    TransactionState::Read => unreachable!("invalid transaction state for SetCookie: TransactionState::Read, should be write"),
-                    TransactionState::None => unreachable!("invalid transaction state for SetCookie: TransactionState::None, should be write"),
-                }
+
+    return_if_io!(pager.with_header_mut(|header| {
+        match cookie {
+            Cookie::ApplicationId => header.application_id = (*value).into(),
+            Cookie::UserVersion => header.user_version = (*value).into(),
+            Cookie::LargestRootPageNumber => {
+                header.vacuum_mode_largest_root_page = (*value as u32).into();
             }
-            program
-                .connection
-                .with_schema_mut(|schema| schema.schema_version = *value as u32);
-            header_accessor::set_schema_cookie(pager, *value as u32)?;
-        }
-        cookie => todo!("{cookie:?} is not yet implement for SetCookie"),
-    }
+            Cookie::IncrementalVacuum => {
+                header.incremental_vacuum_enabled = (*value as u32).into()
+            }
+            Cookie::SchemaVersion => {
+                if mv_store.is_none() {
+                    // we update transaction state to indicate that the schema has changed
+                    match program.connection.transaction_state.get() {
+                        TransactionState::Write { schema_did_change } => {
+                            program.connection.transaction_state.set(TransactionState::Write { schema_did_change: true });
+                        },
+                        TransactionState::Read => unreachable!("invalid transaction state for SetCookie: TransactionState::Read, should be write"),
+                        TransactionState::None => unreachable!("invalid transaction state for SetCookie: TransactionState::None, should be write"),
+                        TransactionState::PendingUpgrade => unreachable!("invalid transaction state for SetCookie: TransactionState::PendingUpgrade, should be write"),
+                    }
+                }
+                program
+                    .connection
+                    .with_schema_mut(|schema| schema.schema_version = *value as u32);
+                header.schema_cookie = (*value as u32).into();
+            }
+            cookie => todo!("{cookie:?} is not yet implement for SetCookie"),
+        };
+    }));
+
     state.pc += 1;
     Ok(InsnFunctionStepResult::Step)
 }
@@ -6231,15 +6354,20 @@ pub fn op_open_ephemeral(
                 Arc::new(Mutex::new(())),
             )?);
 
-            let page_size = header_accessor::get_page_size(&pager)
-                .unwrap_or(storage::sqlite3_ondisk::DEFAULT_PAGE_SIZE)
-                as usize;
+            let page_size = pager
+                .io
+                .block(|| pager.with_header(|header| header.page_size))
+                .unwrap_or_default()
+                .get() as usize;
             buffer_pool.set_page_size(page_size);
 
             state.op_open_ephemeral_state = OpOpenEphemeralState::StartingTxn { pager };
         }
         OpOpenEphemeralState::StartingTxn { pager } => {
             tracing::trace!("StartingTxn");
+            pager
+                .begin_read_tx() // we have to begin a read tx before beginning a write
+                .expect("Failed to start read transaction");
             return_if_io!(pager.begin_write_tx());
             state.op_open_ephemeral_state = OpOpenEphemeralState::CreateBtree {
                 pager: pager.clone(),
@@ -6285,7 +6413,7 @@ pub fn op_open_ephemeral(
             } else {
                 BTreeCursor::new_table(mv_cursor, pager.clone(), root_page as usize, num_columns)
             };
-            cursor.rewind()?; // Will never return io
+            let res = cursor.rewind()?; // Will never return io
 
             let mut cursors: std::cell::RefMut<'_, Vec<Option<Cursor>>> =
                 state.cursors.borrow_mut();
@@ -6537,6 +6665,31 @@ pub fn op_integrity_check(
     Ok(InsnFunctionStepResult::Step)
 }
 
+pub fn op_cast(
+    _program: &Program,
+    state: &mut ProgramState,
+    insn: &Insn,
+    _pager: &Rc<Pager>,
+    _mv_store: Option<&Rc<MvStore>>,
+) -> Result<InsnFunctionStepResult> {
+    let Insn::Cast { reg, affinity } = insn else {
+        unreachable!("unexpected Insn {:?}", insn)
+    };
+
+    let value = state.registers[*reg].get_owned_value().clone();
+    let result = match affinity {
+        Affinity::Blob => value.exec_cast("BLOB"),
+        Affinity::Text => value.exec_cast("TEXT"),
+        Affinity::Numeric => value.exec_cast("NUMERIC"),
+        Affinity::Integer => value.exec_cast("INTEGER"),
+        Affinity::Real => value.exec_cast("REAL"),
+    };
+
+    state.registers[*reg] = Register::Value(result);
+    state.pc += 1;
+    Ok(InsnFunctionStepResult::Step)
+}
+
 impl Value {
     pub fn exec_lower(&self) -> Option<Self> {
         match self {
@@ -6547,7 +6700,12 @@ impl Value {
 
     pub fn exec_length(&self) -> Self {
         match self {
-            Value::Text(_) | Value::Integer(_) | Value::Float(_) => {
+            Value::Text(t) => {
+                // Count Unicode scalar values (characters)
+                Value::Integer(t.as_str().chars().count() as i64)
+            }
+            Value::Integer(_) | Value::Float(_) => {
+                // For numbers, SQLite returns the length of the string representation
                 Value::Integer(self.to_string().chars().count() as i64)
             }
             Value::Blob(blob) => Value::Integer(blob.len() as i64),
@@ -7387,24 +7545,21 @@ fn exec_concat_ws(registers: &[Register]) -> Value {
         return Value::Null;
     }
 
-    let separator = match &registers[0].get_owned_value() {
+    let separator = match registers[0].get_owned_value() {
         Value::Null | Value::Blob(_) => return Value::Null,
         v => format!("{v}"),
     };
 
-    let mut result = String::new();
-    for (i, reg) in registers.iter().enumerate().skip(1) {
-        if i > 1 {
-            result.push_str(&separator);
-        }
-        match reg.get_owned_value() {
-            v if matches!(v, Value::Text(_) | Value::Integer(_) | Value::Float(_)) => {
-                result.push_str(&format!("{v}"))
+    let parts = registers[1..]
+        .iter()
+        .filter_map(|reg| match reg.get_owned_value() {
+            Value::Text(_) | Value::Integer(_) | Value::Float(_) => {
+                Some(format!("{}", reg.get_owned_value()))
             }
-            _ => continue,
-        }
-    }
+            _ => None,
+        });
 
+    let result = parts.collect::<Vec<_>>().join(&separator);
     Value::build_text(result)
 }
 

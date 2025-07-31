@@ -5,17 +5,21 @@ use crate::translate::plan::{DeletePlan, Operation, Plan};
 use crate::translate::planner::{parse_limit, parse_where};
 use crate::vdbe::builder::{ProgramBuilder, ProgramBuilderOpts, TableRefIdCounter};
 use crate::{schema::Schema, Result, SymbolTable};
-use turso_sqlite3_parser::ast::{Expr, Limit, QualifiedName};
+use std::sync::Arc;
+use turso_sqlite3_parser::ast::{Expr, Limit, QualifiedName, ResultColumn};
 
 use super::plan::{ColumnUsedMask, IterationDirection, JoinedTable, TableReferences};
 
+#[allow(clippy::too_many_arguments)]
 pub fn translate_delete(
     schema: &Schema,
     tbl_name: &QualifiedName,
     where_clause: Option<Box<Expr>>,
     limit: Option<Box<Limit>>,
+    returning: Option<Vec<ResultColumn>>,
     syms: &SymbolTable,
     mut program: ProgramBuilder,
+    connection: &Arc<crate::Connection>,
 ) -> Result<ProgramBuilder> {
     if schema.table_has_indexes(&tbl_name.name.to_string()) && !schema.indexes_enabled() {
         // Let's disable altering a table with indices altogether instead of checking column by
@@ -24,12 +28,24 @@ pub fn translate_delete(
             "DELETE for table with indexes is disabled by default. Run with `--experimental-indexes` to enable this feature."
         );
     }
+
+    // FIXME: SQLite's delete using Returning is complex. It scans the table in read mode first, building
+    // the result set, and only after that it opens the table for writing and deletes the rows. It
+    // also uses a couple of instructions that we don't implement yet (i.e.: RowSetAdd, RowSetRead,
+    // RowSetTest). So for now I'll just defer it altogether.
+    if returning.is_some() {
+        crate::bail_parse_error!("RETURNING currently not implemented for DELETE statements.");
+    }
+    let result_columns = vec![];
+
     let mut delete_plan = prepare_delete_plan(
         schema,
         tbl_name,
         where_clause,
         limit,
+        result_columns,
         &mut program.table_reference_counter,
+        connection,
     )?;
     optimize_plan(&mut delete_plan, schema)?;
     let Plan::Delete(ref delete) = delete_plan else {
@@ -50,7 +66,9 @@ pub fn prepare_delete_plan(
     tbl_name: &QualifiedName,
     where_clause: Option<Box<Expr>>,
     limit: Option<Box<Limit>>,
+    result_columns: Vec<super::plan::ResultSetColumn>,
     table_ref_counter: &mut TableRefIdCounter,
+    connection: &Arc<crate::Connection>,
 ) -> Result<Plan> {
     let table = match schema.get_table(tbl_name.name.as_str()) {
         Some(table) => table,
@@ -87,6 +105,7 @@ pub fn prepare_delete_plan(
         &mut table_references,
         None,
         &mut where_predicates,
+        connection,
     )?;
 
     // Parse the LIMIT/OFFSET clause
@@ -94,7 +113,7 @@ pub fn prepare_delete_plan(
 
     let plan = DeletePlan {
         table_references,
-        result_columns: vec![],
+        result_columns,
         where_clause: where_predicates,
         order_by: None,
         limit: resolved_limit,

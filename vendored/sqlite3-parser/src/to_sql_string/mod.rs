@@ -12,7 +12,7 @@ pub trait ToSqlContext {
     /// Currently not considering aliases
     fn get_table_name(&self, id: TableInternalId) -> &str;
     /// Given a table id and a column index, get the column name
-    fn get_column_name(&self, table_id: TableInternalId, col_idx: usize) -> &str;
+    fn get_column_name(&self, table_id: TableInternalId, col_idx: usize) -> String;
 }
 
 #[cfg(test)]
@@ -22,8 +22,12 @@ mod tests {
     struct TestContext;
 
     impl ToSqlContext for TestContext {
-        fn get_column_name(&self, _table_id: crate::ast::TableInternalId, _col_idx: usize) -> &str {
-            "placeholder_column"
+        fn get_column_name(
+            &self,
+            _table_id: crate::ast::TableInternalId,
+            _col_idx: usize,
+        ) -> String {
+            "placeholder_column".to_string()
         }
 
         fn get_table_name(&self, _id: crate::ast::TableInternalId) -> &str {
